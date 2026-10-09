@@ -1,5 +1,6 @@
 # Android/Gradle
 .gradle/
+.kotlin/
 build/
 **/build/
 local.properties
@@ -12,6 +13,8 @@ models/
 recordings/
 **/recordings/
 *.wav
+*.mp3
+*.aar
 *.m4a
 *.pcm
 *.onnx
@@ -22,3 +25,16 @@ recordings/
 # Android package outputs
 *.apk
 *.aab
+
+# Local redaction experiments and user-supplied fixtures
+consent-*.wav
+consent-*.mp3
+test*.wav
+test*.mp3
+WhatsApp Unknown *.zip
+
+# Large offline inference checkpoints kept outside the APK until benchmarked
+*.ckpt
+*.pt
+*.pth
+*.safetensors

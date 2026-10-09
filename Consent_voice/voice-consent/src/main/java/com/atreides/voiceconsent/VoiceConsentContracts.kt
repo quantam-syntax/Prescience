@@ -20,7 +20,7 @@ data class ConsentSession(
     val protocolVersion: Int = VOICE_CONSENT_CONTRACT_VERSION,
 )
 
-enum class SpeechState { PROTECTED, UNCERTAIN, OVERLAP }
+enum class SpeechState { PROTECTED, UNCERTAIN, OVERLAP, UNMATCHED }
 
 data class SpeechDecision(
     val startMs: Long,
