@@ -37,4 +37,20 @@ class MoonshineTranscriber(context: Context) : AutoCloseable {
     }
 
     override fun close() = recognizer.release()
+
+    companion object {
+        /** Sherpa aborts the process on a missing model file, so check first. */
+        fun isAvailable(context: Context): Boolean = runCatching {
+            val files = context.assets.list("sherpa-onnx-moonshine-tiny-en-int8")?.toSet().orEmpty()
+            REQUIRED_FILES.all(files::contains)
+        }.getOrDefault(false)
+
+        private val REQUIRED_FILES = setOf(
+            "preprocess.onnx",
+            "encode.int8.onnx",
+            "uncached_decode.int8.onnx",
+            "cached_decode.int8.onnx",
+            "tokens.txt",
+        )
+    }
 }

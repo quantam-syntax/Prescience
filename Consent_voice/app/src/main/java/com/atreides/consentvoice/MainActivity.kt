@@ -73,7 +73,8 @@ private enum class CaptureMode { ENROLLMENT, SESSION }
 private fun ConsentVoiceApp() {
     var state by remember { mutableStateOf<SessionState>(SessionState.Idle) }
     var persona by remember { mutableStateOf(PersonaEmojiProfile()) }
-    var profile by remember { mutableStateOf<FloatArray?>(null) }
+    var profile by remember { mutableStateOf<List<FloatArray>?>(null) }
+    var enrollmentSamples by remember { mutableStateOf<List<FloatArray>>(emptyList()) }
     var captureMode by remember { mutableStateOf<CaptureMode?>(null) }
     var sessionResult by remember { mutableStateOf("No consent session has been exported.") }
     var liveTranscript by remember { mutableStateOf("") }
@@ -87,6 +88,7 @@ private fun ConsentVoiceApp() {
     val context = LocalContext.current
     var recordingHistory by remember(context) { mutableStateOf(SanitizedRecordingHistory.list(context)) }
     val capture = remember { InMemoryMicCapture() }
+    val passportStore = remember { VoicePassportStore(context.applicationContext) }
     val scope = rememberCoroutineScope()
     val player = remember { MediaPlayer() }
     fun togglePlayback(file: java.io.File) {
@@ -162,12 +164,22 @@ private fun ConsentVoiceApp() {
         }
     }
     LaunchedEffect(Unit) {
-        val result = withContext(Dispatchers.Default) { runCatching { MoonshineTranscriber(context) } }
-        transcriptModelState.value = result.getOrNull()
-        transcriptModelStatus = if (result.isSuccess) {
-            "On-device live transcript ready"
+        if (MoonshineTranscriber.isAvailable(context)) {
+            val result = withContext(Dispatchers.Default) { runCatching { MoonshineTranscriber(context) } }
+            transcriptModelState.value = result.getOrNull()
+            transcriptModelStatus = if (result.isSuccess) {
+                "On-device live transcript ready"
+            } else {
+                "Local transcript model unavailable: ${result.exceptionOrNull()?.message}"
+            }
         } else {
-            "Local transcript model unavailable: ${result.exceptionOrNull()?.message}"
+            transcriptModelStatus = "Live transcript is optional and not installed; voice protection remains available."
+        }
+    }
+    LaunchedEffect(Unit) {
+        passportStore.load().getOrNull()?.let { restored ->
+            profile = restored
+            sessionResult = "Restored your encrypted Voice Passport (${restored.size} position samples)."
         }
     }
     LaunchedEffect(captureMode) {
@@ -209,17 +221,25 @@ private fun ConsentVoiceApp() {
                 Text(transcriptModelStatus, style = MaterialTheme.typography.bodySmall)
                 Text("Voice Consent Studio", style = MaterialTheme.typography.titleMedium)
                 Text("Raw audio stays in memory. Only the consent-sanitized export is written.")
+                val passportPositions = listOf(
+                    "front, close to your mouth", "right side, close", "left side, close",
+                    "front, arm's length",
+                )
+                if (profile == null) Text("Voice Passport: ${enrollmentSamples.size}/4 close-range positions accepted", style = MaterialTheme.typography.bodySmall)
                 if (captureMode == null) {
                     Button(onClick = {
                         runCatching {
+                            if (profile != null) enrollmentSamples = emptyList()
                             capture.start()
                             captureMode = CaptureMode.ENROLLMENT
                             liveTranscript = ""
                             state = SessionState.EnrollmentRequired
+                            val step = enrollmentSamples.size.coerceAtMost(passportPositions.lastIndex)
+                            sessionResult = "Voice Passport step ${step + 1}/4: hold the phone ${passportPositions[step]}. Speak naturally for 5-8 seconds, then stop."
                             sessionResult = "Speak naturally for 5–8 seconds, then stop enrolment."
                         }.onFailure { sessionResult = "Microphone error: ${it.message}" }
                     }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (profile == null) "Enroll protected voice" else "Re-enroll protected voice")
+                        Text(if (profile != null) "Re-enrol Voice Passport" else if (enrollmentSamples.isEmpty()) "Start Voice Passport" else "Record Voice Passport step ${enrollmentSamples.size + 1}/4")
                     }
                     Button(
                         enabled = profile != null,
@@ -252,13 +272,25 @@ private fun ConsentVoiceApp() {
                                         CaptureMode.ENROLLMENT -> {
                                             val pipeline = OnDeviceVoicePipeline(context)
                                             try {
-                                                profile = pipeline.enrollEmbedding(pcm)
-                                                if (profile == null) "Not enough clear speech. Speak alone for 8–12 seconds in a quieter place, then enroll again."
-                                                else "Protected voice enrolled locally (${profile!!.size}-D embedding)."
+                                                val sample = pipeline.enrollEmbedding(pcm)
+                                                if (sample == null) {
+                                                    "This position was rejected: not enough clear solo speech. Repeat the same step in a quieter place."
+                                                } else {
+                                                    val next = enrollmentSamples + sample
+                                                    if (next.size == VoicePassportStore.REQUIRED_SAMPLES) {
+                                                        passportStore.save(next).getOrThrow()
+                                                        profile = next
+                                                        enrollmentSamples = emptyList()
+                                                        "Voice Passport complete: 4 encrypted close-range samples saved locally."
+                                                    } else {
+                                                        enrollmentSamples = next
+                                                        "Voice Passport step ${next.size}/4 accepted. Record the next position."
+                                                    }
+                                                }
                                             } finally { pipeline.close() }
                                         }
                                         CaptureMode.SESSION -> {
-                                            val enrolled = profile ?: error("Enroll a voice first")
+                                            val enrolled = profile ?: error("Complete the Voice Passport first")
                                             val pipeline = OnDeviceVoicePipeline(context)
                                             try {
                                                 val decisions = pipeline.decisions(pcm, enrolled)
@@ -292,6 +324,15 @@ private fun ConsentVoiceApp() {
                 if (captureMode != null) {
                     Text("● RECORDING  ${recordingSeconds}s", color = Color(0xFFD32F2F), style = MaterialTheme.typography.titleSmall)
                     Text("Live local transcript: $liveTranscript", style = MaterialTheme.typography.bodySmall)
+                    if (captureMode == CaptureMode.ENROLLMENT) {
+                        TextButton(onClick = {
+                            capture.stop()
+                            captureMode = null
+                            enrollmentSamples = emptyList()
+                            state = SessionState.Idle
+                            sessionResult = "Voice Passport enrolment cancelled. No sample was saved; you can start again."
+                        }) { Text("Cancel enrolment and restart") }
+                    }
                 }
                 Text(sessionResult, style = MaterialTheme.typography.bodySmall)
                 if (sanitizedExport?.exists() == true) {

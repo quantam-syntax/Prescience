@@ -64,12 +64,26 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
     fun decisions(
         pcm16kMono: FloatArray,
         protectedEmbedding: FloatArray,
-        protectedThreshold: Float = 0.45f,
-        uncertainThreshold: Float = 0.40f,
+        protectedThreshold: Float = 0.35f,
+        uncertainThreshold: Float = 0.28f,
+    ): List<LocalSpeechDecision> = decisions(
+        pcm16kMono = pcm16kMono,
+        protectedEmbeddings = listOf(protectedEmbedding),
+        protectedThreshold = protectedThreshold,
+        uncertainThreshold = uncertainThreshold,
+    )
+
+    /** Scores every utterance against all accepted Voice Passport samples. */
+    fun decisions(
+        pcm16kMono: FloatArray,
+        protectedEmbeddings: List<FloatArray>,
+        protectedThreshold: Float = 0.35f,
+        uncertainThreshold: Float = 0.28f,
     ): List<LocalSpeechDecision> {
-        require(protectedEmbedding.size == embeddingDimension) { "Profile uses a different speaker model" }
+        require(protectedEmbeddings.isNotEmpty()) { "Enroll a voice first" }
+        require(protectedEmbeddings.all { it.size == embeddingDimension }) { "Profile uses a different speaker model" }
         require(uncertainThreshold < protectedThreshold) { "Uncertain threshold must be lower than protected threshold" }
-        require(protectedEmbedding.all { it.isFinite() } && protectedEmbedding.any { it != 0f }) {
+        require(protectedEmbeddings.all { embedding -> embedding.all { it.isFinite() } && embedding.any { it != 0f } }) {
             "Invalid voice profile; please enroll again"
         }
         if (pcm16kMono.isEmpty()) return emptyList()
@@ -79,7 +93,9 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
         }
         if (bursts.isEmpty()) return emptyList()
         return bursts.map { burst ->
-            val score = embeddingFor(burst)?.let { cosineSimilarity(it, protectedEmbedding) } ?: Float.NaN
+            val score = embeddingFor(burst)?.let { candidate ->
+                protectedEmbeddings.maxOf { enrolled -> cosineSimilarity(candidate, enrolled) }
+            } ?: Float.NaN
             LocalSpeechDecision(
                 burst.start,
                 burst.start + burst.samples.size,
@@ -111,13 +127,15 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
         val noiseFloor = sortedEnergy[sortedEnergy.size / 4]
         val threshold = maxOf(0.045f, noiseFloor * 1.8f)
         val active = frames.map { it.third >= threshold }.toMutableList()
-        // Fill pauses up to 80 ms inside one word; longer dips remain boundaries.
+        // A speaker embedding needs a phrase, not a syllable. Keep ordinary pauses
+        // inside the same turn so the verifier has enough of the speaker's voice.
+        // A gap longer than 500 ms is still treated as a new turn.
         var i = 0
         while (i < active.size) {
             if (active[i]) { i++; continue }
             val gapStart = i
             while (i < active.size && !active[i]) i++
-            if (gapStart > 0 && i < active.size && i - gapStart <= 4) {
+            if (gapStart > 0 && i < active.size && i - gapStart <= 25) {
                 for (j in gapStart until i) active[j] = true
             }
         }
@@ -131,7 +149,10 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
                 val last = i - 1
                 val burstStart = (frames[first].first - frameSize * 2).coerceAtLeast(start)
                 val burstEnd = (frames[last].second + frameSize * 2).coerceAtMost(end)
-                if (burstEnd - burstStart >= VOICE_SAMPLE_RATE_HZ * 12 / 100) {
+                // ERes2Net verification is unreliable for word-sized snippets.
+                // Ignore anything under 0.8 s rather than label it as a different
+                // person and leave a random part of a protected utterance audible.
+                if (burstEnd - burstStart >= VOICE_SAMPLE_RATE_HZ * 8 / 10) {
                     add(SpeechSegment(burstStart, pcm.copyOfRange(burstStart, burstEnd)))
                 }
             }
