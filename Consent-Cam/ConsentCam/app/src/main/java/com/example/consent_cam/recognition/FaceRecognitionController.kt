@@ -6,7 +6,6 @@ import com.consentcam.privacy.api.PreciseAssociationState
 import com.consentcam.privacy.api.PreciseAssociationStatus
 import com.example.consent_cam.vision.FaceCrop
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +18,8 @@ import kotlinx.coroutines.launch
 data class RecognitionUiState(
     val association: PreciseAssociationState = PreciseAssociationState(),
     val faceResolutions: Map<Int, FaceConsentResolution> = emptyMap(),
+    /** Session ownership is exposed only for rendering the already-confirmed protection choice. */
+    val protectedSessionByTrackingId: Map<Int, UInt> = emptyMap(),
     val status: String = "Precise matching unavailable",
 )
 
@@ -28,7 +29,7 @@ class FaceRecognitionController(
     private val selector: ProtectedFaceSelector = ProtectedFaceSelector(),
 ) : AutoCloseable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val cropRequestInFlight = AtomicBoolean(false)
+    private val cropRequestLock = Any()
     private val matchCache = TrackingMatchCache()
     private val mutableState = MutableStateFlow(RecognitionUiState())
     val state: StateFlow<RecognitionUiState> = mutableState.asStateFlow()
@@ -36,6 +37,8 @@ class FaceRecognitionController(
     @Volatile private var profiles: List<SessionProfile> = emptyList()
     @Volatile private var generation = 0L
     @Volatile private var visibleTrackingIds: Set<Int> = emptySet()
+    private var nextCropRequestToken = 0L
+    private var activeCropRequest: CropRequest? = null
 
     fun setProfiles(newProfiles: List<SessionProfile>) {
         val old = profiles
@@ -82,29 +85,30 @@ class FaceRecognitionController(
             selectFromCache(activeProfiles, visible)
             return
         }
-        if (!cropRequestInFlight.compareAndSet(false, true)) return
+        val requestToken = acquireCropRequest() ?: return
 
         val requestGeneration = generation
         val accepted = requestCrops { crops ->
-            consumeCrops(crops, requestGeneration, missingIds)
+            consumeCrops(crops, requestGeneration, missingIds, requestToken)
         }
-        if (!accepted) cropRequestInFlight.set(false)
+        if (!accepted) finishCropRequest(requestToken)
     }
 
     private fun consumeCrops(
         crops: List<FaceCrop>,
         requestGeneration: Long,
         requestedIds: Set<Int>,
+        requestToken: Long,
     ) {
-        if (requestGeneration != generation) {
+        if (!isActiveCropRequest(requestToken) || requestGeneration != generation) {
             crops.forEach(FaceCrop::close)
-            cropRequestInFlight.set(false)
+            finishCropRequest(requestToken)
             return
         }
         val requestProfiles = profiles.map(SessionProfile::copyForConsumer)
         if (requestProfiles.isEmpty()) {
             crops.forEach(FaceCrop::close)
-            cropRequestInFlight.set(false)
+            finishCropRequest(requestToken)
             return
         }
 
@@ -120,20 +124,42 @@ class FaceRecognitionController(
                         } else {
                             matcher.match(crop.trackingId, crop.bitmap, requestProfiles)
                         }
-                        if (requestGeneration == generation) matchCache.put(match)
+                        if (isActiveCropRequest(requestToken) && requestGeneration == generation) {
+                            matchCache.put(match)
+                        }
                     } finally {
                         crop.close()
                     }
                 }
-                if (requestGeneration != generation) return@launch
+                if (!isActiveCropRequest(requestToken) || requestGeneration != generation) return@launch
                 (requestedIds - returnedIds).forEach { trackingId ->
                     matchCache.put(unresolved(trackingId, FaceMatchState.INSUFFICIENT_QUALITY))
                 }
                 selectFromCache(requestProfiles, visibleTrackingIds)
             } finally {
                 requestProfiles.forEach(SessionProfile::close)
-                cropRequestInFlight.set(false)
+                finishCropRequest(requestToken)
             }
+        }
+    }
+
+    /** Replaces a crop request that never called back and ignores any late result from it. */
+    private fun acquireCropRequest(): Long? = synchronized(cropRequestLock) {
+        val now = System.nanoTime() / 1_000_000L
+        val active = activeCropRequest
+        if (active != null && now - active.startedAtMs < CROP_REQUEST_TIMEOUT_MS) return null
+        val token = ++nextCropRequestToken
+        activeCropRequest = CropRequest(token, now)
+        token
+    }
+
+    private fun isActiveCropRequest(token: Long): Boolean = synchronized(cropRequestLock) {
+        activeCropRequest?.token == token
+    }
+
+    private fun finishCropRequest(token: Long) {
+        synchronized(cropRequestLock) {
+            if (activeCropRequest?.token == token) activeCropRequest = null
         }
     }
 
@@ -149,9 +175,14 @@ class FaceRecognitionController(
             .mapTo(mutableSetOf(), SessionProfile::sessionId)
         val protectedIds = selector.selectAll(visibleMatches, protectSessionIds)
         mutableState.value = if (protectedIds != null && protectedIds.isNotEmpty()) {
+            val selected = protectedIds.toSet()
+            val protectedSessions = visibleMatches.mapNotNull { match ->
+                match.sessionId?.takeIf { match.trackingId in selected }?.let { match.trackingId to it }
+            }.toMap()
             RecognitionUiState(
                 association = PreciseAssociationState.resolved(protectedIds),
                 faceResolutions = resolutions,
+                protectedSessionByTrackingId = protectedSessions,
                 status = "${protectedIds.size} protected ${if (protectedIds.size == 1) "person" else "people"} matched$scoreSuffix",
             )
         } else {
@@ -203,6 +234,8 @@ class FaceRecognitionController(
     }
 
     private companion object {
+        data class CropRequest(val token: Long, val startedAtMs: Long)
+        const val CROP_REQUEST_TIMEOUT_MS = 1_500L
         const val MINIMUM_CROP_QUALITY = 0.45f
         const val MAX_YAW_DEGREES = 45f
         const val MAX_ROLL_DEGREES = 25f

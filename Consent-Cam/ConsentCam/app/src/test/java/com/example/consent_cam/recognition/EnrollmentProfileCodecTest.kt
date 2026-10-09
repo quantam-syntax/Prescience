@@ -27,4 +27,22 @@ class EnrollmentProfileCodecTest {
     fun malformedProfileIsRejected() {
         assertNull(EnrollmentProfileCodec.decode(byteArrayOf(1, 2, 3)))
     }
+
+    @Test
+    fun encryptedTransportMetadataRoundTripsWithoutBeingPartOfTheEmbedding() {
+        val vector = FloatArray(FACENET_EMBEDDING_DIMENSIONS).also { it[0] = 1f }
+        val profile = EnrollmentProfile(
+            FACENET_MODEL_ID, vector.size, vector, 1234,
+            deviceIdentity = "camera-key-fingerprint",
+            displayName = "Rahul's phone",
+            trustedCameraIdentities = setOf("camera-key-fingerprint", "second-camera"),
+        )
+        val decoded = requireNotNull(EnrollmentProfileCodec.decode(EnrollmentProfileCodec.encode(profile)))
+
+        assertEquals("camera-key-fingerprint", decoded.deviceIdentity)
+        assertEquals("Rahul's phone", decoded.displayName)
+        assertEquals(setOf("camera-key-fingerprint", "second-camera"), decoded.trustedCameraIdentities)
+        decoded.close()
+        profile.close()
+    }
 }

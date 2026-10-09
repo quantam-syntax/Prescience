@@ -1,5 +1,11 @@
 package com.example.consent_cam.privacy.rendering
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.graphics.Matrix
 import android.graphics.RectF
@@ -7,6 +13,7 @@ import android.opengl.EGL14
 import android.opengl.EGLExt
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
+import android.opengl.GLUtils
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
@@ -18,6 +25,8 @@ import androidx.core.util.Consumer
 import com.consentcam.privacy.api.BlurRegion
 import com.consentcam.privacy.api.NormalizedRect
 import com.example.consent_cam.vision.FaceCoordinateMapper
+import com.example.consent_cam.recognition.AvatarStyle
+import com.example.consent_cam.recognition.AvatarPreset
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -29,12 +38,13 @@ import java.util.concurrent.atomic.AtomicReference
  * grid only inside active face boxes, so protected output is pixelated rather than painted over.
  */
 class ProtectedOutputEffect(
+    context: Context,
     onError: (Throwable) -> Unit,
 ) : AutoCloseable {
     private val renderThread = HandlerThread("ConsentCamPixelation").also { it.start() }
     private val renderHandler = Handler(renderThread.looper)
     private val renderExecutor = Executor { command -> renderHandler.post(command) }
-    private val processor = FacePixelationSurfaceProcessor(renderHandler, renderExecutor, onError)
+    private val processor = FacePixelationSurfaceProcessor(context.applicationContext, renderHandler, renderExecutor, onError)
 
     val cameraEffect: CameraEffect = PixelationCameraEffect(
         processor = processor,
@@ -66,6 +76,7 @@ private class PixelationCameraEffect(
 )
 
 private class FacePixelationSurfaceProcessor(
+    private val context: Context,
     private val handler: Handler,
     private val executor: Executor,
     private val onError: (Throwable) -> Unit,
@@ -102,6 +113,7 @@ private class FacePixelationSurfaceProcessor(
     private var eglConfig: android.opengl.EGLConfig? = null
     private var program = 0
     private var textureId = 0
+    private var avatarAtlasTextureId = 0
     private var inputTexture: SurfaceTexture? = null
     private var inputSurface: Surface? = null
     private var inputRequest: SurfaceRequest? = null
@@ -170,6 +182,7 @@ private class FacePixelationSurfaceProcessor(
             releaseInput()
             if (program != 0) GLES20.glDeleteProgram(program)
             if (textureId != 0) GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
+            if (avatarAtlasTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(avatarAtlasTextureId), 0)
             if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
                 EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
                 EGL14.eglDestroyContext(eglDisplay, eglContext)
@@ -203,6 +216,7 @@ private class FacePixelationSurfaceProcessor(
     }
 
     private fun render(textureTransform: FloatArray, snapshot: State, surfaceOutput: SurfaceOutput) {
+        ensureAvatarAtlas()
         GLES20.glUseProgram(program)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -229,13 +243,71 @@ private class FacePixelationSurfaceProcessor(
                 GLES20.glGetUniformLocation(program, "uFaceAngles[$index]"),
                 Math.toRadians(region.rotationDegrees.toDouble()).toFloat(),
             )
+            val avatar = snapshot.protectedFrame.avatarStylesByTrackingId[region.trackingId]
+            val preset = snapshot.protectedFrame.avatarPresetsByTrackingId[region.trackingId]
+            GLES20.glUniform1i(
+                GLES20.glGetUniformLocation(program, "uFaceModes[$index]"),
+                if (preset != null) 2 else if (avatar != null) 1 else 0,
+            )
+            putAvatarSlot("uAvatarSlots[$index]", preset)
+            putAvatarColor("uAvatarSkin[$index]", avatar?.skinColor ?: 0)
+            putAvatarColor("uAvatarHair[$index]", avatar?.hairColor ?: 0)
+            putAvatarColor("uAvatarShirt[$index]", avatar?.shirtColor ?: 0)
         }
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uCameraTexture"), 0)
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, avatarAtlasTextureId)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uAvatarAtlas"), 1)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         GLES20.glDisableVertexAttribArray(position)
         GLES20.glDisableVertexAttribArray(textureCoordinate)
+    }
+
+    private fun putAvatarColor(uniform: String, color: Int) {
+        val alpha = ((color ushr 24) and 0xFF) / 255f
+        val red = ((color ushr 16) and 0xFF) / 255f
+        val green = ((color ushr 8) and 0xFF) / 255f
+        val blue = (color and 0xFF) / 255f
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(program, uniform), red, green, blue, alpha)
+    }
+
+    private fun putAvatarSlot(uniform: String, preset: AvatarPreset?) {
+        val index = preset?.ordinal ?: 0
+        val column = index % AVATAR_GRID_SIZE
+        val row = index / AVATAR_GRID_SIZE
+        val cell = 1f / AVATAR_GRID_SIZE
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(program, uniform), column * cell, row * cell, cell, cell)
+    }
+
+    private fun ensureAvatarAtlas() {
+        if (avatarAtlasTextureId != 0) return
+        val side = AVATAR_CELL_SIZE * AVATAR_GRID_SIZE
+        val atlas = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
+        try {
+            val canvas = Canvas(atlas)
+            canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+            AvatarPreset.entries.forEachIndexed { index, preset ->
+                val portrait = context.assets.open("avatars/${preset.assetFile}").use(BitmapFactory::decodeStream) ?: return@forEachIndexed
+                try {
+                    val column = index % AVATAR_GRID_SIZE
+                    val row = index / AVATAR_GRID_SIZE
+                    canvas.drawBitmap(portrait, null, Rect(column * AVATAR_CELL_SIZE, row * AVATAR_CELL_SIZE, (column + 1) * AVATAR_CELL_SIZE, (row + 1) * AVATAR_CELL_SIZE), null)
+                } finally {
+                    portrait.recycle()
+                }
+            }
+            avatarAtlasTextureId = IntArray(1).also { GLES20.glGenTextures(1, it, 0) }[0]
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, avatarAtlasTextureId)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, atlas, 0)
+        } finally {
+            atlas.recycle()
+        }
     }
 
     /**
@@ -386,6 +458,8 @@ private class FacePixelationSurfaceProcessor(
 
     private companion object {
         const val MAX_FACE_REGIONS = 6
+        const val AVATAR_GRID_SIZE = 3
+        const val AVATAR_CELL_SIZE = 128
 
         const val VERTEX_SHADER = """
             attribute vec4 aPosition;
@@ -401,16 +475,29 @@ private class FacePixelationSurfaceProcessor(
             #extension GL_OES_EGL_image_external : require
             precision mediump float;
             uniform samplerExternalOES uCameraTexture;
+            uniform sampler2D uAvatarAtlas;
             uniform mat4 uTexMatrix;
             uniform int uProtectionActive;
             uniform int uFaceCount;
             uniform vec4 uFaceRects[6];
             uniform float uFaceAngles[6];
+            uniform int uFaceModes[6];
+            uniform vec4 uAvatarSkin[6];
+            uniform vec4 uAvatarHair[6];
+            uniform vec4 uAvatarShirt[6];
+            uniform vec4 uAvatarSlots[6];
             varying vec2 vScreenCoord;
             void main() {
               vec2 faceCoord = vec2(vScreenCoord.x, 1.0 - vScreenCoord.y);
               bool protectedFace = false;
+              bool avatarFace = false;
               vec4 protectedRect = vec4(0.0);
+              vec2 protectedOval = vec2(0.0);
+              vec3 avatarSkin = vec3(0.0);
+              vec3 avatarHair = vec3(0.0);
+              vec3 avatarShirt = vec3(0.0);
+              vec4 avatarSlot = vec4(0.0);
+              int avatarMode = 0;
               for (int index = 0; index < 6; index++) {
                 if (index < uFaceCount) {
                   vec4 face = uFaceRects[index];
@@ -428,11 +515,37 @@ private class FacePixelationSurfaceProcessor(
                   if (!protectedFace && dot(oval, oval) <= 1.0) {
                     protectedFace = true;
                     protectedRect = face;
+                    protectedOval = oval;
+                    avatarMode = uFaceModes[index];
+                    avatarFace = avatarMode > 0;
+                    avatarSkin = uAvatarSkin[index].rgb;
+                    avatarHair = uAvatarHair[index].rgb;
+                    avatarShirt = uAvatarShirt[index].rgb;
+                    avatarSlot = uAvatarSlots[index];
                   }
                 }
               }
               vec2 samplingScreenCoord = vScreenCoord;
               if (uProtectionActive == 1 && protectedFace) {
+                if (avatarMode == 2) {
+                  vec2 portraitCoordinate = vec2((protectedOval.x + 1.0) * 0.5, (protectedOval.y + 1.0) * 0.5);
+                  vec4 portrait = texture2D(uAvatarAtlas, avatarSlot.xy + portraitCoordinate * avatarSlot.zw);
+                  if (portrait.a > 0.05) {
+                    gl_FragColor = portrait;
+                    return;
+                  }
+                }
+                if (avatarFace) {
+                  vec3 avatar = avatarSkin;
+                  float hairLine = -0.32 + 0.22 * (1.0 - abs(protectedOval.x));
+                  if (protectedOval.y < hairLine) avatar = avatarHair;
+                  bool leftEye = abs(protectedOval.x + 0.30) < 0.09 && abs(protectedOval.y + 0.03) < 0.07;
+                  bool rightEye = abs(protectedOval.x - 0.30) < 0.09 && abs(protectedOval.y + 0.03) < 0.07;
+                  if (leftEye || rightEye) avatar = vec3(0.08, 0.08, 0.10);
+                  if (protectedOval.y > 0.58) avatar = avatarShirt;
+                  gl_FragColor = vec4(avatar, 1.0);
+                  return;
+                }
                 vec2 faceSize = max(protectedRect.zw - protectedRect.xy, vec2(0.001));
                 vec2 block = faceSize / vec2(10.0, 12.0);
                 vec2 pixelatedFace = protectedRect.xy +

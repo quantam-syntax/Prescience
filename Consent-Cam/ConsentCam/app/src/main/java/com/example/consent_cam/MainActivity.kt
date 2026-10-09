@@ -43,6 +43,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -54,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -96,6 +98,7 @@ import com.example.consent_cam.privacy.rendering.ProtectedFrameState
 import com.example.consent_cam.ui.theme.ConsentCamTheme
 import com.example.consent_cam.vision.FaceDetectionState
 import com.example.consent_cam.recognition.EnrollmentUiState
+import com.example.consent_cam.recognition.AvatarPreset
 import com.example.consent_cam.recognition.ExactFaceMatcher
 import com.example.consent_cam.recognition.FaceEnrollmentController
 import com.example.consent_cam.recognition.FaceEmbeddingRuntimeState
@@ -103,10 +106,16 @@ import com.example.consent_cam.recognition.FaceRecognitionController
 import com.example.consent_cam.recognition.LiteRtFaceEmbedder
 import com.example.consent_cam.recognition.OwnerProfileStore
 import com.example.consent_cam.recognition.RecognitionUiState
+import com.example.consent_cam.recognition.TrustedCameraStore
+import com.example.consent_cam.recognition.TrustedCameraState
+import com.example.consent_cam.recognition.DevicePairingCode
+import com.example.consent_cam.recognition.SessionProfile
+import com.consentcam.privacy.api.FaceConsentResolution
 import com.consentcam.privacy.api.PrivacyMode as CorePrivacyMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 
 private val CameraBlack = Color(0xFF050505)
 private val CameraPanel = Color(0xFF151515)
@@ -148,6 +157,9 @@ private fun ConsentCamApp() {
     val enrollmentController = remember {
         FaceEnrollmentController(faceEmbedder, OwnerProfileStore(context.applicationContext))
     }
+    val trustedCameraStore = remember { TrustedCameraStore(context.applicationContext) }
+    val trustedCameraState by trustedCameraStore.state.collectAsStateWithLifecycle()
+    val appScope = rememberCoroutineScope()
     val enrollmentState by enrollmentController.state.collectAsStateWithLifecycle()
     val recognitionController = remember {
         FaceRecognitionController(ExactFaceMatcher(faceEmbedder))
@@ -187,6 +199,7 @@ private fun ConsentCamApp() {
         bleController.setPrivacyZonePreset(preset)
     }
     LaunchedEffect(Unit) {
+        trustedCameraStore.load()
         val savedConsent = runCatching {
             AppearanceConsent.valueOf(preferences.getString("appearance_consent", null) ?: "")
         }.getOrDefault(AppearanceConsent.OFF)
@@ -207,10 +220,15 @@ private fun ConsentCamApp() {
         }
         onDispose { }
     }
-    LaunchedEffect(enrollmentState.hasProfile, enrollmentState.profileRevision) {
+    LaunchedEffect(enrollmentState.hasProfile, enrollmentState.profileRevision, trustedCameraState.revision, trustedCameraState.identity) {
         val profile = if (enrollmentState.hasProfile) enrollmentController.loadProfile() else null
         try {
-            bleController.setOwnerProfile(profile)
+            val transportProfile = profile?.withTrustMetadata(
+                identity = trustedCameraState.identity,
+                name = trustedCameraState.displayName,
+                trustedCameras = trustedCameraState.cameras.map { it.identity }.toSet(),
+            )
+            try { bleController.setOwnerProfile(transportProfile) } finally { transportProfile?.close() }
         } finally {
             profile?.close()
         }
@@ -244,6 +262,8 @@ private fun ConsentCamApp() {
                 privacyMode = privacyMode,
                 privacyEnabled = privacyEnabled,
                 bleState = bleState,
+                receivedProfiles = receivedProfiles,
+                recorderIdentity = trustedCameraState.identity,
                 recognitionState = recognitionState,
                 recognitionController = recognitionController,
                 hasPermission = cameraPermissionGranted,
@@ -255,6 +275,7 @@ private fun ConsentCamApp() {
                 localAiController = localAiController,
                 localAiState = localAiState,
                 thermalLevel = thermalLevel,
+                onCameraSessionActive = bleController::setCameraSessionActive,
             )
             AppScreen.SETTINGS -> SettingsScreen(
                 privacyMode = privacyMode,
@@ -264,6 +285,8 @@ private fun ConsentCamApp() {
                 localAiState = localAiState,
                 localModelDirectory = localAiController.modelDirectory().absolutePath,
                 bleState = bleState,
+                trustedCameraState = trustedCameraState,
+                nearbyProfiles = receivedProfiles,
                 onSetPrivacyMode = setPrivacyMode,
                 onPrivacyEnabledChanged = {
                     privacyEnabled = it
@@ -272,6 +295,11 @@ private fun ConsentCamApp() {
                 onSetConsent = setConsent,
                 onEnroll = { screen = AppScreen.ENROLLMENT },
                 onDeleteProfile = enrollmentController::deleteProfile,
+                onAvatarEnabledChanged = enrollmentController::setAvatarEnabled,
+                onAvatarPresetSelected = enrollmentController::selectAvatarPreset,
+                onSaveDisplayName = { name -> appScope.launch { trustedCameraStore.setDisplayName(name) } },
+                onTrustCamera = { profile -> appScope.launch { trustedCameraStore.trust(profile.deviceIdentity, profile.displayName) } },
+                onRevokeCamera = { identity -> appScope.launch { trustedCameraStore.revoke(identity) } },
                 onSetPrivacyZone = setPrivacyZone,
                 onImportLocalModel = { modelImportLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
                 onInitializeLocalAi = localAiController::initialize,
@@ -376,6 +404,8 @@ private fun CameraScreen(
     privacyMode: PrivacyMode,
     privacyEnabled: Boolean,
     bleState: BleConsentUiState,
+    receivedProfiles: List<com.example.consent_cam.recognition.SessionProfile>,
+    recorderIdentity: String,
     recognitionState: RecognitionUiState,
     recognitionController: FaceRecognitionController,
     hasPermission: Boolean,
@@ -387,6 +417,7 @@ private fun CameraScreen(
     localAiController: LocalAiController,
     localAiState: LocalAiUiState,
     thermalLevel: ThermalLevel,
+    onCameraSessionActive: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -406,6 +437,11 @@ private fun CameraScreen(
     var cameraError by remember { mutableStateOf<String?>(null) }
     var faceDetection by remember { mutableStateOf(FaceDetectionState()) }
     var protectedFrame by remember { mutableStateOf(ProtectedFrameState()) }
+    // A trust grant is never established from uncertainty. Once a face has been confidently
+    // matched to a trusted participant, retain that visibility decision for its current ML Kit
+    // tracking ID. This avoids blur flicker from a single poor crop; losing the track, revoking
+    // trust, or losing the trusted session clears the lease immediately.
+    var trustedFaceLeases by remember { mutableStateOf<Map<Int, UInt>>(emptyMap()) }
     // A nearby consent signal alone must not block ordinary photography. Protected output is
     // required only while a confirmed PROTECT face has an active rendered region.
     fun requiresProtectedOutput(): Boolean = privacyEnabled && protectedFrame.regions.any { it.enabled }
@@ -456,50 +492,109 @@ private fun CameraScreen(
             )
         }
     }
+    val enhancedProfileAvailable = privacyMode == PrivacyMode.ENHANCED && bleState.preciseProfileAvailable
+    val privacySignalActive = if (privacyMode == PrivacyMode.ENHANCED) {
+        enhancedProfileAvailable
+    } else {
+        bleState.protectionActive
+    }
     LaunchedEffect(
         faceDetection,
         bleState.protectionActive,
         bleState.preciseMatchingActive,
+        bleState.preciseProfileAvailable,
         privacyEnabled,
         privacyMode,
         recognitionState.association,
         recognitionState.faceResolutions,
+        recognitionState.protectedSessionByTrackingId,
+        receivedProfiles,
+        recorderIdentity,
+        trustedFaceLeases,
     ) {
         if (privacyMode == PrivacyMode.ENHANCED) {
             recognitionController.updateFaces(
                 faces = faceDetection.faces,
-                protectionActive = privacyEnabled && bleState.preciseMatchingActive,
+                protectionActive = privacyEnabled && enhancedProfileAvailable,
                 requestCrops = controller::requestFaceCrops,
             )
         }
+        // Trust never creates a face association. It only changes the result for an already
+        // confirmed MATCHED_PROTECT face in Enhanced mode; unknown/ambiguous faces remain visible.
+        val profilesBySession = receivedProfiles.associateBy { it.sessionId }
+        val newlyTrustedLeases = recognitionState.protectedSessionByTrackingId.mapNotNull { (trackingId, sessionId) ->
+            profilesBySession[sessionId]
+                ?.takeIf { recorderIdentity.isNotBlank() && recorderIdentity in it.trustedCameraIdentities }
+                ?.let { trackingId to sessionId }
+        }.toMap()
+        val visibleIds = faceDetection.faces.mapTo(mutableSetOf()) { it.trackingId }
+        val activeTrustedSessionIds = profilesBySession.values
+            .filter { recorderIdentity.isNotBlank() && recorderIdentity in it.trustedCameraIdentities }
+            .mapTo(mutableSetOf()) { it.sessionId }
+        val retainedLeases = trustedFaceLeases.filter { (trackingId, sessionId) ->
+            trackingId in visibleIds && sessionId in activeTrustedSessionIds
+        }
+        val nextTrustedLeases = retainedLeases + newlyTrustedLeases
+        if (nextTrustedLeases != trustedFaceLeases) trustedFaceLeases = nextTrustedLeases
+        val trustedTrackingIds = nextTrustedLeases.keys
+        val effectiveResolutions = recognitionState.faceResolutions.mapValues { (trackingId, resolution) ->
+            if (trackingId in trustedTrackingIds) {
+                FaceConsentResolution.MATCHED_ALLOW
+            } else resolution
+        }
+        // The coordinator gives a resolved association precedence over per-face results. Remove
+        // only trusted, already-confirmed faces from that association so their MATCHED_ALLOW
+        // decision takes effect; any other confirmed PROTECT face remains protected.
+        val effectiveAssociation = if (
+            recognitionState.association.status == com.consentcam.privacy.api.PreciseAssociationStatus.RESOLVED
+        ) {
+            val stillProtected = recognitionState.association.protectedTrackingIds - trustedTrackingIds
+            if (stillProtected.isEmpty()) {
+                com.consentcam.privacy.api.PreciseAssociationState.resolving()
+            } else {
+                com.consentcam.privacy.api.PreciseAssociationState.resolved(stillProtected)
+            }
+        } else recognitionState.association
         val regions = privacyCoordinator.regions(
             faces = faceDetection.faces,
-            proximityProtectionActive = bleState.protectionActive,
+            proximityProtectionActive = privacySignalActive,
             mode = if (privacyMode == PrivacyMode.ENHANCED) CorePrivacyMode.PRECISE else CorePrivacyMode.PROXIMITY,
-            preciseAssociation = if (bleState.preciseMatchingActive) {
-                recognitionState.association
+            preciseAssociation = if (enhancedProfileAvailable) {
+                effectiveAssociation
             } else {
                 com.consentcam.privacy.api.PreciseAssociationState()
             },
-            faceResolutions = recognitionState.faceResolutions,
+            faceResolutions = effectiveResolutions,
             privacyEnabled = privacyEnabled,
         )
         // A selective session must not retain a stale mask while its face association is
-        // uncertain. PROXIMITY mode still supplies enabled regions for broad protection.
+        // uncertain. A previously verified trusted track is explicitly represented as ALLOW;
+        // PROXIMITY mode still supplies enabled regions for broad protection.
         val hasConfirmedProtectedRegion = regions.any { it.enabled }
+        val avatarStylesBySession = receivedProfiles.associate { it.sessionId to it }
+        val avatarStylesByTrackingId = recognitionState.protectedSessionByTrackingId.mapNotNull { (trackingId, sessionId) ->
+            val profile = avatarStylesBySession[sessionId]
+            profile?.avatarStyle?.takeIf { profile.presentation == com.example.consent_cam.recognition.ProtectionPresentation.AVATAR }
+                ?.let { trackingId to it }
+        }.toMap()
+        val avatarPresetsByTrackingId = recognitionState.protectedSessionByTrackingId.mapNotNull { (trackingId, sessionId) ->
+            avatarStylesBySession[sessionId]?.avatarPreset?.let { trackingId to it }
+        }.toMap()
         protectedFrame = ProtectedFrameState(
             regions = faceRegionSmoother.update(
                 regions = regions,
                 frameTimestampNs = faceDetection.timestampNs,
-                protectionActive = privacyEnabled && bleState.protectionActive && hasConfirmedProtectedRegion,
+                protectionActive = privacyEnabled && privacySignalActive && hasConfirmedProtectedRegion,
             ),
             sourceWidth = faceDetection.sourceWidth,
             sourceHeight = faceDetection.sourceHeight,
             detectionState = faceDetection,
+            avatarStylesByTrackingId = avatarStylesByTrackingId,
+            avatarPresetsByTrackingId = avatarPresetsByTrackingId,
         )
         controller.updateProtection(
             protectedFrame,
-            privacyEnabled && bleState.protectionActive && hasConfirmedProtectedRegion,
+            privacyEnabled && privacySignalActive && hasConfirmedProtectedRegion,
         )
     }
 
@@ -525,6 +620,10 @@ private fun CameraScreen(
             controller.unbind()
         }
     }
+    DisposableEffect(hasPermission) {
+        if (hasPermission) onCameraSessionActive(true)
+        onDispose { onCameraSessionActive(false) }
+    }
     DisposableEffect(controller) {
         onDispose { controller.close() }
     }
@@ -538,7 +637,7 @@ private fun CameraScreen(
             FacePixelationOverlay(
                 detection = faceDetection,
                 protectedFrame = protectedFrame,
-                protectionActive = privacyEnabled && bleState.protectionActive,
+                protectionActive = privacyEnabled && privacySignalActive,
                 modifier = Modifier.fillMaxSize(),
             )
         }
@@ -565,7 +664,11 @@ private fun CameraScreen(
                 privacyEnabled,
                 bleState,
                 faceDetection.faces.size,
-                if (privacyMode == PrivacyMode.ENHANCED) recognitionState.status else null,
+                if (privacyMode == PrivacyMode.ENHANCED) {
+                    if (trustedFaceLeases.isNotEmpty() && recognitionState.status.startsWith("Match uncertain")) {
+                        "Trusted camera: verified person remains visible"
+                    } else recognitionState.status
+                } else null,
             )
             if (isRecording) {
                 Spacer(Modifier.height(9.dp))
@@ -640,17 +743,27 @@ private fun SettingsScreen(
     localAiState: LocalAiUiState,
     localModelDirectory: String,
     bleState: BleConsentUiState,
+    trustedCameraState: TrustedCameraState,
+    nearbyProfiles: List<SessionProfile>,
     onSetPrivacyMode: (PrivacyMode) -> Unit,
     onPrivacyEnabledChanged: (Boolean) -> Unit,
     onSetConsent: (AppearanceConsent) -> Unit,
     onEnroll: () -> Unit,
     onDeleteProfile: () -> Unit,
+    onAvatarEnabledChanged: (Boolean) -> Unit,
+    onAvatarPresetSelected: (AvatarPreset) -> Unit,
+    onSaveDisplayName: (String) -> Unit,
+    onTrustCamera: (SessionProfile) -> Unit,
+    onRevokeCamera: (String) -> Unit,
     onSetPrivacyZone: (PrivacyZonePreset) -> Unit,
     onImportLocalModel: () -> Unit,
     onInitializeLocalAi: () -> Unit,
     onRunLocalAudit: () -> Unit,
     onBack: () -> Unit,
 ) {
+    var displayNameDraft by remember(trustedCameraState.displayName) { mutableStateOf(trustedCameraState.displayName) }
+    var pendingTrust by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var enteredPairingCode by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 34.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { CircleButton("‹", "Back", onBack); Spacer(Modifier.width(16.dp)); Text("Settings", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(38.dp)); Text("MY CONSENT SIGNAL", color = MutedText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(12.dp))
@@ -767,10 +880,123 @@ private fun SettingsScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = IqooYellow, contentColor = Color.Black),
                 ) { Text(if (enrollmentState.hasProfile) "Re-enrol my face" else "Enrol my face") }
                 if (enrollmentState.hasProfile) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Avatar replacement", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text("Your matched PROTECT face uses a local illustrated avatar. Blur is the fallback.", color = MutedText, fontSize = 12.sp, lineHeight = 16.sp)
+                        }
+                        Switch(checked = enrollmentState.avatarEnabled, onCheckedChange = onAvatarEnabledChanged)
+                    }
+                    if (enrollmentState.avatarEnabled) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("Choose your character", color = MutedText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        AvatarPreset.entries.chunked(2).forEach { row ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                row.forEach { preset ->
+                                    val selected = preset == enrollmentState.avatarPreset
+                                    OutlinedButton(
+                                        onClick = { onAvatarPresetSelected(preset) },
+                                        modifier = Modifier.weight(1f),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) IqooYellow else MutedText),
+                                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 9.dp),
+                                    ) {
+                                        Text(preset.label, color = if (selected) IqooYellow else Color.White, fontSize = 11.sp, maxLines = 2, textAlign = TextAlign.Center)
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(7.dp))
+                        }
+                    }
                     Spacer(Modifier.height(10.dp))
                     OutlinedButton(onClick = onDeleteProfile, modifier = Modifier.fillMaxWidth()) { Text("Delete profile", color = Color.White) }
                 }
             }
+        }
+        Spacer(Modifier.height(22.dp)); Text("TRUSTED CAMERAS", color = MutedText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(12.dp))
+        Card(colors = CardDefaults.cardColors(containerColor = CameraPanel), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(18.dp)) {
+                Text("Let selected cameras capture you", color = Color.White, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(5.dp))
+                Text("A trusted camera sees your already-confirmed PROTECT face normally in Enhanced protection. Each phone has its own pairing code; enter the recorder's code to grant access. You can revoke it immediately.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = displayNameDraft,
+                    onValueChange = { displayNameDraft = it.take(48) },
+                    label = { Text("My shared display name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = { onSaveDisplayName(displayNameDraft) }, modifier = Modifier.fillMaxWidth()) { Text("Save display name", color = IqooYellow) }
+                Spacer(Modifier.height(10.dp))
+                Text("This phone's pairing code: ${DevicePairingCode.forIdentity(trustedCameraState.identity)}", color = SafeGreen, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                val nearbyCameras = nearbyProfiles.filter { it.deviceIdentity.isNotBlank() && it.deviceIdentity != trustedCameraState.identity }
+                Spacer(Modifier.height(14.dp))
+                Text("NEARBY PRESCIENCE CAMERAS", color = MutedText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                if (nearbyCameras.isEmpty()) {
+                    Spacer(Modifier.height(5.dp)); Text("No nearby enrolled Prescience camera yet. The other phone must have an enrolled profile and an active ALLOW or PROTECT signal.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                } else nearbyCameras.forEach { profile ->
+                    val trusted = trustedCameraState.cameras.any { it.identity == profile.deviceIdentity }
+                    val label = profile.displayName.ifBlank { "Nearby Prescience" }
+                    val code = DevicePairingCode.forIdentity(profile.deviceIdentity)
+                    Spacer(Modifier.height(8.dp))
+                    Text(label, color = Color.White, fontWeight = FontWeight.Bold)
+                    Text("Recorder pairing code: $code", color = MutedText, fontSize = 12.sp)
+                    if (!trusted) {
+                        OutlinedButton(onClick = {
+                            pendingTrust = profile.deviceIdentity to label
+                            enteredPairingCode = ""
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Connect this camera", color = IqooYellow) }
+                    } else {
+                        OutlinedButton(onClick = { onRevokeCamera(profile.deviceIdentity) }, modifier = Modifier.fillMaxWidth()) { Text("Revoke $label", color = Color.White) }
+                    }
+                }
+                if (trustedCameraState.cameras.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp)); Text("TRUSTED UNTIL REVOKED", color = MutedText, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    trustedCameraState.cameras.filter { trusted -> nearbyCameras.none { it.deviceIdentity == trusted.identity } }.forEach { trusted ->
+                        Spacer(Modifier.height(6.dp))
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(trusted.displayName, color = Color.White, modifier = Modifier.weight(1f))
+                            OutlinedButton(onClick = { onRevokeCamera(trusted.identity) }) { Text("Revoke", color = Color.White, fontSize = 12.sp) }
+                        }
+                    }
+                }
+            }
+        }
+        pendingTrust?.let { (identity, label) ->
+            val expectedCode = DevicePairingCode.forIdentity(identity)
+            AlertDialog(
+                onDismissRequest = { pendingTrust = null },
+                containerColor = CameraPanel,
+                titleContentColor = Color.White,
+                textContentColor = MutedText,
+                title = { Text("Connect $label") },
+                text = {
+                    Column {
+                        Text("Enter the 6-digit code displayed on $label. This confirms you selected the nearby recorder you intend to trust.")
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedTextField(
+                            value = enteredPairingCode,
+                            onValueChange = { enteredPairingCode = it.filter(Char::isDigit).take(6) },
+                            label = { Text("Recorder pairing code") },
+                            singleLine = true,
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            nearbyProfiles.firstOrNull { it.deviceIdentity == identity }?.let(onTrustCamera)
+                            pendingTrust = null
+                        },
+                        enabled = enteredPairingCode == expectedCode,
+                        colors = ButtonDefaults.buttonColors(containerColor = IqooYellow, contentColor = Color.Black),
+                    ) { Text("Connect") }
+                },
+                dismissButton = { OutlinedButton(onClick = { pendingTrust = null }) { Text("Cancel", color = Color.White) } },
+            )
         }
         Spacer(Modifier.height(22.dp)); Text("LOCAL ON-DEVICE AI", color = MutedText, fontSize = 12.sp, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(12.dp))
         Card(colors = CardDefaults.cardColors(containerColor = CameraPanel), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth()) {

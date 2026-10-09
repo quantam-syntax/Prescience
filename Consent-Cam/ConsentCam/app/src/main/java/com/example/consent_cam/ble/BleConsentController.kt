@@ -104,6 +104,7 @@ class BleConsentController(context: Context) : AutoCloseable {
     private var advertisedCounter = -1L
     private var ownerProfileBytes: ByteArray? = null
     private val preciseProfileLostSinceMs = mutableMapOf<UInt, Long>()
+    @Volatile private var cameraSessionActive = false
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -340,7 +341,7 @@ class BleConsentController(context: Context) : AutoCloseable {
                 preciseProfileLostSinceMs.remove(profile.sessionId)
             } else {
                 val lostSince = preciseProfileLostSinceMs.getOrPut(profile.sessionId) { now }
-                if (now - lostSince >= PRECISE_PROFILE_LOST_GRACE_MS) {
+                if (!cameraSessionActive && now - lostSince >= PRECISE_PROFILE_LOST_GRACE_MS) {
                     removePreciseProfile(profile.sessionId)
                     preciseProfileLostSinceMs.remove(profile.sessionId)
                 }
@@ -359,6 +360,18 @@ class BleConsentController(context: Context) : AutoCloseable {
             protectionActive = nearbyProtect > 0,
             preciseMatchingActive = preciseProtectInsideZone,
         )
+    }
+
+    /** Keeps received profiles only in RAM for this open camera session through scanner gaps. */
+    fun setCameraSessionActive(active: Boolean) {
+        if (cameraSessionActive == active) return
+        cameraSessionActive = active
+        if (!active) {
+            val sessionIds = synchronized(profileLock) { profilesBySession.keys.toList() }
+            sessionIds.forEach(::removePreciseProfile)
+            preciseProfileLostSinceMs.clear()
+        }
+        refreshNearbyState()
     }
 
     fun setPrivacyZonePreset(preset: PrivacyZonePreset) {

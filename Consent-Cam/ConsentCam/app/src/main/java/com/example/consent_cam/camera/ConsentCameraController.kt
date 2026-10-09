@@ -59,12 +59,21 @@ class ConsentCameraController(private val context: Context) {
     private val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
     private val analysisExecutor = Executors.newSingleThreadExecutor()
     private val faceDetector = MlKitFaceDetector()
-    private val pendingFaceCropRequest = AtomicReference<((List<FaceCrop>) -> Unit)?>(null)
+    private data class PendingFaceCropRequest(
+        val createdAtMs: Long,
+        val callback: (List<FaceCrop>) -> Unit,
+    )
+
+    private val pendingFaceCropRequest = AtomicReference<PendingFaceCropRequest?>(null)
 
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var videoCapture: VideoCapture<Recorder>? = null
     private var activeRecording: Recording? = null
+
+    private companion object {
+        const val FACE_CROP_REQUEST_TIMEOUT_MS = 1_500L
+    }
     private var protectedOutputEffect: ProtectedOutputEffect? = null
     private var activeCamera: Camera? = null
     @Volatile private var protectedOutputFailed = false
@@ -80,7 +89,7 @@ class ConsentCameraController(private val context: Context) {
         cameraProviderFuture.addListener({
             try {
                 if (protectedOutputEffect == null) {
-                    protectedOutputEffect = ProtectedOutputEffect { error ->
+                    protectedOutputEffect = ProtectedOutputEffect(context.applicationContext) { error ->
                         protectedOutputFailed = true
                         mainExecutor.execute {
                             stopRecording()
@@ -111,13 +120,14 @@ class ConsentCameraController(private val context: Context) {
                     .build()
                     .also { analysis ->
                         analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                            expireStalledFaceCropRequest()
                             faceDetector.analyze(
                                 imageProxy = imageProxy,
                                 mirrorHorizontally = lensFacing == CameraSelector.LENS_FACING_FRONT,
                                 onResult = onFacesDetected,
                                 captureFaceCrops = pendingFaceCropRequest.get() != null,
                                 onFaceCrops = { crops ->
-                                    pendingFaceCropRequest.getAndSet(null)?.invoke(crops)
+                                    pendingFaceCropRequest.getAndSet(null)?.callback?.invoke(crops)
                                         ?: crops.forEach(FaceCrop::close)
                                 },
                                 onError = onError,
@@ -203,7 +213,7 @@ class ConsentCameraController(private val context: Context) {
         stopRecording()
         imageAnalysis?.clearAnalyzer()
         imageAnalysis = null
-        pendingFaceCropRequest.getAndSet(null)?.invoke(emptyList())
+        pendingFaceCropRequest.getAndSet(null)?.callback?.invoke(emptyList())
         activeCamera = null
         if (cameraProviderFuture.isDone) {
             runCatching { cameraProviderFuture.get().unbindAll() }
@@ -273,8 +283,23 @@ class ConsentCameraController(private val context: Context) {
     }
 
     /** Requests aligned in-memory crops from one future analyzed frame. */
-    fun requestFaceCrops(onResult: (List<FaceCrop>) -> Unit): Boolean =
-        pendingFaceCropRequest.compareAndSet(null, onResult)
+    fun requestFaceCrops(onResult: (List<FaceCrop>) -> Unit): Boolean {
+        expireStalledFaceCropRequest()
+        return pendingFaceCropRequest.compareAndSet(
+            null,
+            PendingFaceCropRequest(
+                createdAtMs = android.os.SystemClock.elapsedRealtime(),
+                callback = onResult,
+            ),
+        )
+    }
+
+    /** ML Kit may drop a frame without delivering crop results. Do not strand the next request. */
+    private fun expireStalledFaceCropRequest() {
+        val pending = pendingFaceCropRequest.get() ?: return
+        if (android.os.SystemClock.elapsedRealtime() - pending.createdAtMs < FACE_CROP_REQUEST_TIMEOUT_MS) return
+        if (pendingFaceCropRequest.compareAndSet(pending, null)) pending.callback(emptyList())
+    }
 
     fun takePhoto(
         requireProtection: Boolean,

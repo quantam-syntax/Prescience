@@ -19,6 +19,8 @@ data class EnrollmentUiState(
     val processing: Boolean = false,
     val status: String = "No protected-face profile",
     val profileRevision: Long = 0,
+    val avatarEnabled: Boolean = false,
+    val avatarPreset: AvatarPreset? = null,
 )
 
 class FaceEnrollmentController(
@@ -38,8 +40,11 @@ class FaceEnrollmentController(
             val available = store.hasProfile()
             if (!closed.get()) {
                 val current = mutableState.value
+                val profile = if (available) store.load().getOrNull() else null
                 mutableState.value = current.copy(
                     hasProfile = available,
+                    avatarEnabled = profile?.presentation == ProtectionPresentation.AVATAR,
+                    avatarPreset = profile?.avatarPreset,
                     profileRevision = 1,
                     status = if (current.status == "No protected-face profile") {
                         if (available) "Protected-face profile ready" else current.status
@@ -47,6 +52,7 @@ class FaceEnrollmentController(
                         current.status
                     },
                 )
+                profile?.close()
             }
         }
     }
@@ -145,6 +151,45 @@ class FaceEnrollmentController(
         }
     }
 
+    fun setAvatarEnabled(enabled: Boolean) {
+        if (!mutableState.value.hasProfile) return
+        val requestGeneration = generation.get()
+        scope.launch {
+            val profile = store.load().getOrNull() ?: return@launch
+            val updated = try {
+                if (enabled) profile.withAvatarPreset(profile.avatarPreset ?: AvatarPreset.IRON_MAN)
+                else profile.withPresentation(ProtectionPresentation.BLUR)
+            } finally { profile.close() }
+            val saved = try { store.save(updated).isSuccess } finally { updated.close() }
+            if (saved && isCurrent(requestGeneration)) {
+                mutableState.value = mutableState.value.copy(
+                    avatarEnabled = enabled,
+                    avatarPreset = if (enabled) updated.avatarPreset else null,
+                    profileRevision = mutableState.value.profileRevision + 1,
+                    status = if (enabled) "Protected-face profile ready with avatar" else "Protected-face profile ready with blur",
+                )
+            }
+        }
+    }
+
+    fun selectAvatarPreset(preset: AvatarPreset) {
+        if (!mutableState.value.hasProfile) return
+        val requestGeneration = generation.get()
+        scope.launch {
+            val profile = store.load().getOrNull() ?: return@launch
+            val updated = try { profile.withAvatarPreset(preset) } finally { profile.close() }
+            val saved = try { store.save(updated).isSuccess } finally { updated.close() }
+            if (saved && isCurrent(requestGeneration)) {
+                mutableState.value = mutableState.value.copy(
+                    avatarEnabled = true,
+                    avatarPreset = preset,
+                    profileRevision = mutableState.value.profileRevision + 1,
+                    status = "Protected-face profile ready with ${preset.label}",
+                )
+            }
+        }
+    }
+
     suspend fun loadProfile(): EnrollmentProfile? = store.load().getOrNull()
 
     override fun close() {
@@ -183,6 +228,7 @@ class FaceEnrollmentController(
             dimensions = FACENET_EMBEDDING_DIMENSIONS,
             embedding = requireNotNull(aggregate),
             createdAtEpochMs = System.currentTimeMillis(),
+            presentation = ProtectionPresentation.BLUR,
         )
         aggregate.fill(0f)
         val saved = try {

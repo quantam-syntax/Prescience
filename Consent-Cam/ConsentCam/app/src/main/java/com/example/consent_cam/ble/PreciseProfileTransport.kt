@@ -341,7 +341,20 @@ class PreciseProfileTransport(
         val enrollment = try { EnrollmentProfileCodec.decode(plaintext) } finally { plaintext.fill(0) }
             ?: return failClient("Face profile model was incompatible")
         val embedding = enrollment.embeddingCopy()
-        val profile = try { SessionProfile(pending.sessionId, pending.consent, enrollment.modelId, embedding) } finally {
+        val profile = try {
+            SessionProfile(
+                sessionId = pending.sessionId,
+                consent = pending.consent,
+                modelId = enrollment.modelId,
+                embedding = embedding,
+                presentation = enrollment.presentation,
+                avatarStyle = enrollment.avatarStyle,
+                avatarPreset = enrollment.avatarPreset,
+                deviceIdentity = enrollment.deviceIdentity,
+                displayName = enrollment.displayName,
+                trustedCameraIdentities = enrollment.trustedCameraIdentities,
+            )
+        } finally {
             embedding.fill(0f)
             enrollment.close()
         }
