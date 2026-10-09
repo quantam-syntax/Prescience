@@ -1,0 +1,24 @@
+# Android/Gradle
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+
+# Sensitive local assets - never commit these
+models/
+**/models/
+recordings/
+**/recordings/
+*.wav
+*.m4a
+*.pcm
+*.onnx
+*.tflite
+*.key
+*.keystore
+
+# Android package outputs
+*.apk
+*.aab
