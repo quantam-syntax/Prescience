@@ -13,7 +13,18 @@ The intended offline flow is:
 
 ## Current state
 
-The project compiles the domain contracts and a Compose demo UI once an Android SDK and Gradle wrapper/toolchain are available. Model inference, BLE transport, microphone capture, and redaction are deliberately represented by interfaces, not hidden fakes.
+The Android app records and imports audio, creates a local voice profile, and
+writes a sanitized WAV. The active offline engine uses Silero VAD and the
+English VoxCeleb ERes2Net speaker-verification model. Each detected utterance
+is compared directly with the enrolled profile; only a confirmed match is
+muted. Uncertain speech is retained and reported for review.
+
+This handles speakers taking turns. It does not yet separate simultaneous
+voices. The repository contains an ignored offline evaluation copy of
+SpeechBrain SepFormer (`models/separation/speechbrain-sepformer-wsj02mix`), a
+two-speaker separation model. It is not packaged into the APK or integrated
+until it is exported to an Android-compatible runtime and benchmarked on the
+iQOO 15.
 
 Read [the model contract](docs/VOICE_MODEL_CONTRACT.md) and [the redaction contract](docs/REDACTION_INTEGRATION_CONTRACT.md) before changing any interfaces.
 
@@ -23,4 +34,5 @@ Read [the model contract](docs/VOICE_MODEL_CONTRACT.md) and [the redaction contr
 - `Voice_redaction`: Yazeen's separate redaction engine.
 - Exchange only the versioned redaction contract, consented test fixtures, and a versioned engine artifact.
 
-No raw recordings, embeddings, model files, or credentials belong in Git.
+No raw recordings, embeddings, model files, experimental checkpoints, or
+credentials belong in Git.
