@@ -1,0 +1,14 @@
+Qualcomm Hexagon NPU runtime
+===========================
+
+Runtime artifacts:
+- com.qualcomm.qti:qnn-runtime:2.49.0
+- com.qualcomm.qti:qnn-litert-delegate:2.49.0
+
+The artifacts are distributed under the Qualcomm AI Hub Model License included
+inside their AAR files. Runtime documentation:
+https://docs.qualcomm.com/bundle/publicresource/topics/80-63442-50/tflite_delegate.html
+
+ConsentCam configures the QNN LiteRT delegate for the Hexagon HTP using FP16.
+If delegate creation or invocation fails, FaceNet falls back to GPU and then
+CPU/XNNPACK and exposes the real selected backend in Settings.

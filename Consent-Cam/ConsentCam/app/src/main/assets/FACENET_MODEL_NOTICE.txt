@@ -1,0 +1,12 @@
+FaceNet-512 model asset
+
+File: facenet_512.tflite
+SHA-256: 4ff97d406893bc4aae2d922c28287045d58fa9fbcbfeb731b975fd2debbf1a80
+Source: https://github.com/shubham0204/FaceRecognition_With_FaceNet_Android
+Source path: app/src/main/assets/facenet_512.tflite
+Source project license: Apache License 2.0
+Implementation reference: https://github.com/shubham0204/OnDevice-Face-Recognition-Android
+Reference project license: Apache License 2.0
+
+The source project states that this model was converted from the FaceNet-512 implementation
+provided by DeepFace. Review upstream model/training-data terms before any commercial release.

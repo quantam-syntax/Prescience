@@ -1,0 +1,17 @@
+LiteRT-LM Android runtime
+
+Artifact: com.google.ai.edge.litertlm:litertlm-android:0.16.1
+Source: https://github.com/google-ai-edge/LiteRT-LM
+License: Apache License 2.0
+
+Optional local models are not bundled with this repository or APK:
+
+- google/gemma-3n-E4B-it-litert-lm
+  File: gemma-3n-E4B-it-int4.litertlm
+  Source revision: 297ed75955702dec3503e00c2c2ecbbf475300bc
+- google/gemma-3n-E2B-it-litert-lm
+  File: gemma-3n-E2B-it-int4.litertlm
+  Source revision: ba9ca88da013b537b6ed38108be609b8db1c3a16
+
+Users must review and accept the applicable Gemma model license before obtaining
+or provisioning either model.

@@ -1,0 +1,30 @@
+# Android Studio and Gradle state
+**/.gradle/
+**/.kotlin/
+*.litertlm
+**/.idea/
+**/local.properties
+**/build/
+**/captures/
+**/.externalNativeBuild/
+**/.cxx/
+*.iml
+
+# Android packages and signing material
+*.apk
+*.aab
+*.apks
+*.keystore
+*.jks
+key.properties
+
+# Local OS and diagnostic files
+.DS_Store
+Thumbs.db
+*.log
+device-artifacts/
+.android-sdk/
+.android-sdk-commandline.zip
+
+# Non-code project material kept outside the source repository
+*.pptx
