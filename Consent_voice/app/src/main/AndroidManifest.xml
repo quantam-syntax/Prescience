@@ -9,6 +9,8 @@
         android:allowBackup="false"
         android:label="Consent Voice"
         android:theme="@style/Theme.ConsentVoice">
+        <!-- Needed by QAIRT to access the Qualcomm FastRPC transport on HTP devices. -->
+        <uses-library android:name="libcdsprpc.so" android:required="false" />
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"

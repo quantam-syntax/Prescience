@@ -84,6 +84,7 @@ private fun ConsentVoiceApp() {
     val transcriptModelState = remember { mutableStateOf<MoonshineTranscriber?>(null) }
     var transcriptModelStatus by remember { mutableStateOf("Loading local transcript model…") }
     var sanitizedExport by remember { mutableStateOf<java.io.File?>(null) }
+    var separatedSources by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
     var isPlayingExport by remember { mutableStateOf(false) }
     var playingExportPath by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -146,6 +147,34 @@ private fun ConsentVoiceApp() {
                         "${warning}Selected audio processed locally: $confirmed confirmed match(es) muted; $ambiguous uncertain and $retained nonmatching utterance(s) retained. Review before sharing. Tap Play or ↓ to download."
                     } finally { pipeline.close() }
                 }.getOrElse { "Could not sanitize selected audio: ${it.message}" }
+            }
+        }
+    }
+    val separationPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            sessionResult = "Loading first four seconds for on-device HTP separation…"
+            sessionResult = withContext(Dispatchers.Default) {
+                runCatching {
+                    val pcm16k = ImportedAudioDecoder.decodeTo16kMono(context, uri)
+                    val input8k = FloatArray(QairtSepformer.inputSamples) { index ->
+                        pcm16k.getOrElse(index * 2) { 0f }
+                    }
+                    QairtSepformerModel.initialize(context)?.let { error(it) }
+                    val raw = QairtSepformer.separate(input8k)
+                    require(raw.size == QairtSepformer.inputSamples * QairtSepformer.sources)
+                    // Exported SepFormer output is [time, source].
+                    val sourceA = normalizeForPreview(FloatArray(QairtSepformer.inputSamples) { raw[it * 2] })
+                    val sourceB = normalizeForPreview(FloatArray(QairtSepformer.inputSamples) { raw[it * 2 + 1] })
+                    val folder = java.io.File(context.filesDir, "separation-preview").apply { mkdirs() }
+                    val stamp = System.currentTimeMillis()
+                    val a = java.io.File(folder, "sepformer-source-a-$stamp.wav")
+                    val b = java.io.File(folder, "sepformer-source-b-$stamp.wav")
+                    SanitizedWavWriter.write(a, sourceA, 8_000)
+                    SanitizedWavWriter.write(b, sourceB, 8_000)
+                    separatedSources = listOf(a, b)
+                    "HTP separation complete. Play Source A and Source B; these are the first four seconds only."
+                }.getOrElse { "HTP separation failed: ${it.message}" }
             }
         }
     }
@@ -316,6 +345,10 @@ private fun ConsentVoiceApp() {
                         onClick = { audioPicker.launch(arrayOf("audio/*")) },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Select audio from phone and sanitize") }
+                    Button(
+                        onClick = { separationPicker.launch(arrayOf("audio/*")) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Test HTP voice separation (first 4 seconds)") }
                 } else {
                     Button(onClick = {
                         val mode = captureMode ?: return@Button
@@ -384,6 +417,15 @@ private fun ConsentVoiceApp() {
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
+                if (separatedSources.isNotEmpty()) {
+                    Text("HTP separation preview", style = MaterialTheme.typography.titleSmall)
+                    separatedSources.forEachIndexed { index, file ->
+                        Button(onClick = { togglePlayback(file) }, modifier = Modifier.fillMaxWidth()) {
+                            Text(if (isPlayingExport && playingExportPath == file.absolutePath) "Pause Source ${if (index == 0) "A" else "B"}" else "Play Source ${if (index == 0) "A" else "B"}")
+                        }
+                    }
+                    Text("Preview files stay in this app only and are not exported to Downloads.", style = MaterialTheme.typography.bodySmall)
+                }
                 if (recordingHistory.isNotEmpty()) {
                     Text("Sanitized recording history", style = MaterialTheme.typography.titleSmall)
                     recordingHistory.filter { it != sanitizedExport }.take(8).forEach { recording ->
@@ -411,6 +453,13 @@ private fun ConsentVoiceApp() {
             }
         }
     }
+}
+
+private fun normalizeForPreview(samples: FloatArray): FloatArray {
+    val peak = samples.maxOfOrNull { kotlin.math.abs(it) } ?: 0f
+    if (peak <= 0f || !peak.isFinite()) return samples
+    val gain = minOf(1f, 0.92f / peak)
+    return FloatArray(samples.size) { samples[it] * gain }
 }
 
 @androidx.compose.runtime.Composable

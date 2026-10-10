@@ -152,12 +152,34 @@ The high-level QAIRT cache-building runner reported a 16-bit native input
 buffer, whereas the low-level runner accepts the float input and performs the
 correct conversion. The validated app integration path is therefore: build the
 cache once through the high-level API, then load and execute that cached DLC
-through the low-level API with float tensors.
+through the low-level API. The bridge reads tensor metadata and converts 8 kHz
+float audio to the model's native 16-bit quantized tensors before execution.
 
 Use `scripts/make_sepformer_calibration.py` to create calibration windows and
 `scripts/compare_sepformer_outputs.py` to compare a device output with the
 float ONNX reference. Generated `.dlc` files, SDK runtimes and all local audio
 remain ignored.
+
+## Android HTP preview: 2026-10-10
+
+The app now contains a QAIRT C++ JNI bridge and a locally staged V81 HTP
+runtime. A real iQOO 15 instrumentation test passed: the cached W8A16 DLC
+initializes inside the installed APK in 0.879 seconds. The app also exposes
+**Test HTP voice separation (first 4 seconds)** for imported audio. It
+downsamples the first four seconds from 16 kHz to 8 kHz, runs the HTP model,
+normalizes each source only for private listening, and plays Source A or B.
+
+This is deliberately separate from redaction. Next:
+
+1. Listen to both sources with solo voice, alternating speakers, and overlap.
+2. Confirm source order and amplitude on representative recordings.
+3. Score both reconstructed sources with the enrolled ERes2Net profile.
+4. Add overlapping windows and source continuity for recordings over four seconds.
+5. Compare recall and friend-speech retention with the CPU baseline.
+
+The SDK, runtime `.so` files, cached DLC, generated previews and native build
+output remain ignored. Run `scripts/stage_qairt_sepformer.ps1` locally before
+an Android build that includes the native bridge.
 
 ## Integration decision
 
