@@ -5,7 +5,9 @@ plugins {
 
 android {
     namespace = "com.atreides.consentvoice"
-    ndkVersion = "27.2.12479018"
+    val qairtSdkRoot = rootProject.projectDir.resolve(".tools/qairt/2.50.40.260831")
+    val hasQairtSdk = qairtSdkRoot.resolve("include/QAIRT/QairtCpp/QairtApi.hpp").isFile
+    if (hasQairtSdk) ndkVersion = "27.2.12479018"
     compileSdk {
         version = release(37)
     }
@@ -20,9 +22,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk { abiFilters += "arm64-v8a" }
-        externalNativeBuild {
-            cmake {
-                arguments += "-DQAIRT_SDK_ROOT=${rootProject.projectDir}/.tools/qairt/2.50.40.260831"
+        if (hasQairtSdk) {
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DQAIRT_SDK_ROOT=$qairtSdkRoot"
+                }
             }
         }
     }
@@ -30,8 +34,10 @@ android {
     buildFeatures {
         compose = true
     }
-    externalNativeBuild {
-        cmake { path = file("src/main/cpp/CMakeLists.txt") }
+    if (hasQairtSdk) {
+        externalNativeBuild {
+            cmake { path = file("src/main/cpp/CMakeLists.txt") }
+        }
     }
     useLibrary("android.test.runner")
     useLibrary("android.test.base")

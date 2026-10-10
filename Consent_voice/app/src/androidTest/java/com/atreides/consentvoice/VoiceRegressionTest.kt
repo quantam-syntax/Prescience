@@ -7,6 +7,7 @@ import android.os.SystemClock
 import com.atreides.voiceconsent.OnDeviceVoicePipeline
 import com.atreides.voiceconsent.LocalSpeechDecision
 import com.atreides.voiceconsent.PcmConsentRedactor
+import com.atreides.voiceconsent.LocalReplacementAudio
 import com.atreides.voiceconsent.SpeechState
 import com.atreides.voiceconsent.SPEAKER_MODEL_ID
 import com.atreides.voiceconsent.cosineSimilarity
@@ -215,6 +216,20 @@ class VoiceRegressionTest : InstrumentationTestCase() {
         }
         assertTrue(pcm.all { it == 0.25f })
         assertEquals(pcm.size, result.size)
+    }
+
+    fun testReplacementOverwritesMixedAudioAndFadesItsEdges() {
+        val mixed = FloatArray(100) { 0.75f }
+        val result = PcmConsentRedactor.redactWithReplacements(
+            mixed,
+            listOf(LocalSpeechDecision(20, 80, 0.9f, SpeechState.OVERLAP)),
+            listOf(LocalReplacementAudio(20, 80, FloatArray(60) { 0.25f })),
+        )
+        assertEquals(0.75f, result[19])
+        assertEquals(0.75f, result[80])
+        assertTrue("replacement must overwrite the original mixed audio", result.sliceArray(20 until 80).all { it <= 0.25f })
+        assertTrue("replacement must be audible away from the fade", result[50] > 0f)
+        assertTrue("the raw input must remain unchanged", mixed.all { it == 0.75f })
     }
 
     private fun nanosToMs(value: Long): Double = value / 1_000_000.0

@@ -3,6 +3,8 @@ package com.atreides.consentvoice
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -15,5 +17,19 @@ class QairtSepformerSmokeTest {
         val error = QairtSepformerModel.initialize(context)
         assertNull("QAIRT HTP initialization failed: $error", error)
         QairtSepformer.close()
+    }
+
+    @Test
+    fun runsFixedShapeHtpInference() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val error = QairtSepformerModel.initialize(context)
+        assertNull("QAIRT HTP initialization failed: $error", error)
+        try {
+            val output = QairtSepformer.separate(FloatArray(QairtSepformer.inputSamples))
+            assertEquals(QairtSepformer.inputSamples * QairtSepformer.sources, output.size)
+            assertTrue("HTP output must be finite", output.all { it.isFinite() })
+        } finally {
+            QairtSepformer.close()
+        }
     }
 }

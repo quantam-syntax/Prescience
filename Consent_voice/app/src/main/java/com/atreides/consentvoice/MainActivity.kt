@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -49,6 +50,9 @@ import com.atreides.voiceconsent.PersonaPalette
 import com.atreides.voiceconsent.OnDeviceVoicePipeline
 import com.atreides.voiceconsent.MoonshineTranscriber
 import com.atreides.voiceconsent.PcmConsentRedactor
+import com.atreides.voiceconsent.SourceAwareRedactionProcessor
+import com.atreides.voiceconsent.SourceSelectionPolicy
+import com.atreides.voiceconsent.WindowedTwoSpeakerSeparator
 import com.atreides.voiceconsent.SpeechState
 import com.atreides.voiceconsent.SessionState
 import com.atreides.voiceconsent.VOICE_SAMPLE_RATE_HZ
@@ -84,6 +88,8 @@ private fun ConsentVoiceApp() {
     val transcriptModelState = remember { mutableStateOf<MoonshineTranscriber?>(null) }
     var transcriptModelStatus by remember { mutableStateOf("Loading local transcript model…") }
     var sanitizedExport by remember { mutableStateOf<java.io.File?>(null) }
+    // The legacy preview launcher remains unreachable while the automatic
+    // source-aware path is validated; it must not persist raw separated audio.
     var separatedSources by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
     var isPlayingExport by remember { mutableStateOf(false) }
     var playingExportPath by remember { mutableStateOf<String?>(null) }
@@ -134,19 +140,25 @@ private fun ConsentVoiceApp() {
                 runCatching {
                     val pipeline = OnDeviceVoicePipeline(context)
                     try {
-                        val decisions = pipeline.decisions(pcm, enrolled)
-                        val sanitized = PcmConsentRedactor.redact(pcm, decisions)
+                        val sourceAware = WindowedTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
+                            SourceAwareRedactionProcessor(
+                                separator,
+                                SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO,
+                            ).redact(pcm, pipeline, enrolled)
+                        }
+                        val sanitized = sourceAware.sanitized
                         val export = SanitizedRecordingHistory.newExport(context)
                         SanitizedWavWriter.write(export, sanitized)
                         sanitizedExport = export
                         recordingHistory = SanitizedRecordingHistory.list(context)
-                        val confirmed = decisions.count { it.state == SpeechState.PROTECTED }
-                        val ambiguous = decisions.count { it.state == SpeechState.UNCERTAIN }
-                        val retained = decisions.count { it.state == SpeechState.UNMATCHED }
-                        val warning = if (confirmed == 0) "WARNING: No confirmed voice match; no speech was redacted. " else ""
-                        "${warning}Selected audio processed locally: $confirmed confirmed match(es) muted; $ambiguous uncertain and $retained nonmatching utterance(s) retained. Review before sharing. Tap Play or ↓ to download."
+                        val npu = if (sourceAware.backend.name == "QAIRT_HTP") "iQOO NPU used" else "NPU unavailable; safe mute fallback"
+                        val warning = "${sourceAware.protectedOnlyMuted} protected-only muted; ${sourceAware.overlapSeparated} overlap separated; ${sourceAware.overlapFullyMutedForSafety} overlap fully muted for safety. $npu. ${sourceAware.warning.orEmpty()} "
+                        "${warning}Selected audio processed locally. Review the result before sharing. Tap Play or ↓ to download."
                     } finally { pipeline.close() }
-                }.getOrElse { "Could not sanitize selected audio: ${it.message}" }
+                }.getOrElse { error ->
+                    Log.e("ConsentVoice", "Selected audio sanitization failed", error)
+                    "Could not sanitize selected audio: ${error.message}"
+                }
             }
         }
     }
@@ -345,10 +357,6 @@ private fun ConsentVoiceApp() {
                         onClick = { audioPicker.launch(arrayOf("audio/*")) },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text("Select audio from phone and sanitize") }
-                    Button(
-                        onClick = { separationPicker.launch(arrayOf("audio/*")) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Test HTP voice separation (first 4 seconds)") }
                 } else {
                     Button(onClick = {
                         val mode = captureMode ?: return@Button
@@ -371,7 +379,13 @@ private fun ConsentVoiceApp() {
                                                 val scoreRange = decisions
                                                     .map { it.score }
                                                     .let { scores -> if (scores.isEmpty()) "n/a" else "${"%.2f".format(scores.min())}–${"%.2f".format(scores.max())}" }
-                                                val sanitized = PcmConsentRedactor.redact(pcm, decisions)
+                                                val sourceAware = WindowedTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
+                                                    SourceAwareRedactionProcessor(
+                                                        separator,
+                                                        SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO,
+                                                    ).redact(pcm, pipeline, enrolled)
+                                                }
+                                                val sanitized = sourceAware.sanitized
                                                 val export = SanitizedRecordingHistory.newExport(context)
                                                 SanitizedWavWriter.write(export, sanitized)
                                                 sanitizedExport = export
@@ -379,8 +393,9 @@ private fun ConsentVoiceApp() {
                                                 val transcript = transcriptModelState.value?.transcribe(sanitized).orEmpty()
                                                 liveTranscript = if (transcript.isBlank()) "[No speech retained in sanitized export]" else transcript
                                                 state = SessionState.Idle
-                                                val warning = if (confirmedProtected == 0 && overlapWithheld == 0) "WARNING: No confirmed voice match; no speech was redacted. " else ""
-                                                "${warning}Export created: $confirmedProtected confirmed match(es) and $overlapWithheld overlap window(s) muted; $ambiguous uncertain and $retained nonmatching utterance(s) retained. Review before sharing. Local match scores $scoreRange. ${export.name} is the only saved audio."
+                                                val npu = if (sourceAware.backend.name == "QAIRT_HTP") "iQOO NPU used" else "NPU unavailable; safe mute fallback"
+                                                val warning = "${sourceAware.protectedOnlyMuted} protected-only muted; ${sourceAware.overlapSeparated} overlap separated; ${sourceAware.overlapFullyMutedForSafety} overlap fully muted for safety. $npu. ${sourceAware.warning.orEmpty()} "
+                                                "${warning}Export created. Review the result before sharing. ${export.name} is the only saved audio."
                                             } finally { pipeline.close() }
                                         }
                                     }
@@ -416,15 +431,6 @@ private fun ConsentVoiceApp() {
                         "Playback is only the consent-sanitized export. The original microphone capture was never saved.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                }
-                if (separatedSources.isNotEmpty()) {
-                    Text("HTP separation preview", style = MaterialTheme.typography.titleSmall)
-                    separatedSources.forEachIndexed { index, file ->
-                        Button(onClick = { togglePlayback(file) }, modifier = Modifier.fillMaxWidth()) {
-                            Text(if (isPlayingExport && playingExportPath == file.absolutePath) "Pause Source ${if (index == 0) "A" else "B"}" else "Play Source ${if (index == 0) "A" else "B"}")
-                        }
-                    }
-                    Text("Preview files stay in this app only and are not exported to Downloads.", style = MaterialTheme.typography.bodySmall)
                 }
                 if (recordingHistory.isNotEmpty()) {
                     Text("Sanitized recording history", style = MaterialTheme.typography.titleSmall)

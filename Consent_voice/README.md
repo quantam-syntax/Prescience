@@ -35,6 +35,11 @@ on the HTP, then provides app-private playback of Source A and Source B. It is
 a listening and device-validation preview only: it does not alter consent
 redaction or export the sources.
 
+The consent pipeline also has a source-aware boundary: only a successful QAIRT
+HTP result may be used to retain the unprotected separated stream. If the
+runtime, model, identity decision, timing, or source quality is unavailable,
+the overlap is muted rather than exporting the original mix.
+
 Read [the model contract](docs/VOICE_MODEL_CONTRACT.md) and [the redaction contract](docs/REDACTION_INTEGRATION_CONTRACT.md) before changing any interfaces.
 
 ## Workspace boundary

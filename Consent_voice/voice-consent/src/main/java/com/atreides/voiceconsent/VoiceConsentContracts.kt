@@ -3,7 +3,8 @@ package com.atreides.voiceconsent
 import java.time.Instant
 import java.util.UUID
 
-const val VOICE_CONSENT_CONTRACT_VERSION = 1
+/** Version 2 adds replacement audio for a successfully separated overlap. */
+const val VOICE_CONSENT_CONTRACT_VERSION = 2
 
 data class VoiceProfileDescriptor(
     val profileId: UUID,
@@ -41,7 +42,22 @@ data class RedactionRequest(
     val contractVersion: Int = VOICE_CONSENT_CONTRACT_VERSION,
     val audio: AudioAsset,
     val decisions: List<SpeechDecision>,
+    /**
+     * PCM that replaces (never mixes with) the original audio for an approved
+     * overlap. Audio stays app-private and is written only into the sanitized
+     * output.
+     */
+    val replacements: List<ReplacementAudioSegment> = emptyList(),
 )
+
+data class ReplacementAudioSegment(
+    val startMs: Long,
+    val endMs: Long,
+    val pcm16kMono: FloatArray,
+    val source: ReplacementSource = ReplacementSource.SEPARATED_UNPROTECTED,
+)
+
+enum class ReplacementSource { SEPARATED_UNPROTECTED }
 
 data class RedactionResult(
     val sanitizedReference: String,
