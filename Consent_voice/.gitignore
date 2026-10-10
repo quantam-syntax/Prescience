@@ -6,6 +6,11 @@ build/
 local.properties
 *.iml
 .idea/
+.venv*/
+.downloads/
+.tools/
+.tmp/
+tmp_*/
 
 # Sensitive local assets - never commit these
 models/
@@ -19,6 +24,7 @@ recordings/
 *.pcm
 *.onnx
 *.tflite
+*.dlc
 *.key
 *.keystore
 

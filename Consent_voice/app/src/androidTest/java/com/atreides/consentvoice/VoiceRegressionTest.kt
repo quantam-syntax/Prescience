@@ -3,6 +3,7 @@ package com.atreides.consentvoice
 import android.test.InstrumentationTestCase
 import android.util.Log
 import android.net.Uri
+import android.os.SystemClock
 import com.atreides.voiceconsent.OnDeviceVoicePipeline
 import com.atreides.voiceconsent.LocalSpeechDecision
 import com.atreides.voiceconsent.PcmConsentRedactor
@@ -17,6 +18,57 @@ import java.nio.ByteOrder
 
 /** Local supplied fixture only; never logs samples, embeddings, or transcript. */
 class VoiceRegressionTest : InstrumentationTestCase() {
+    fun testCpuPipelineBenchmark() {
+        val context = instrumentation.targetContext
+        val enrollment = fixture("test1.wav").let { it.copyOfRange(216000, it.size) }
+        val sessions = listOf(
+            "test1" to fixture("test1.wav"),
+            "test3" to fixture("test3.wav"),
+            "test4" to run {
+                val source = File(context.cacheDir, "benchmark-test4.mp3")
+                instrumentation.context.assets.open("test4.mp3").use { input ->
+                    source.outputStream().use { output -> input.copyTo(output) }
+                }
+                ImportedAudioDecoder.decodeTo16kMono(context, Uri.fromFile(source))
+            },
+        )
+
+        val initStarted = SystemClock.elapsedRealtimeNanos()
+        OnDeviceVoicePipeline(context).use { pipeline ->
+            val initMs = nanosToMs(SystemClock.elapsedRealtimeNanos() - initStarted)
+            val enrollmentStarted = SystemClock.elapsedRealtimeNanos()
+            val profile = requireNotNull(pipeline.enrollEmbedding(enrollment))
+            val enrollmentMs = nanosToMs(SystemClock.elapsedRealtimeNanos() - enrollmentStarted)
+
+            // Warm up native kernels before recording steady-state inference.
+            pipeline.decisions(sessions.first().second, profile)
+            sessions.forEach { (name, pcm) ->
+                val samples = LongArray(BENCHMARK_REPETITIONS)
+                var decisionCount = 0
+                repeat(BENCHMARK_REPETITIONS) { iteration ->
+                    val started = SystemClock.elapsedRealtimeNanos()
+                    val decisions = pipeline.decisions(pcm, profile)
+                    samples[iteration] = SystemClock.elapsedRealtimeNanos() - started
+                    decisionCount = decisions.size
+                }
+                val medianMs = nanosToMs(samples.sorted()[samples.size / 2])
+                val audioMs = pcm.size * 1_000.0 / 16_000.0
+                val realTimeFactor = medianMs / audioMs
+                Log.i(
+                    "VoiceBenchmark",
+                    "backend=cpu model=$SPEAKER_MODEL_ID clip=$name audioMs=${"%.1f".format(audioMs)} " +
+                        "medianMs=${"%.1f".format(medianMs)} rtf=${"%.4f".format(realTimeFactor)} decisions=$decisionCount",
+                )
+                assertTrue("CPU pipeline must remain faster than real time for $name", realTimeFactor < 1.0)
+            }
+            Log.i(
+                "VoiceBenchmark",
+                "backend=cpu model=$SPEAKER_MODEL_ID initMs=${"%.1f".format(initMs)} " +
+                    "enrollmentMs=${"%.1f".format(enrollmentMs)} embeddingDimension=${profile.size}",
+            )
+        }
+    }
+
     fun testTest4Diagnostics() {
         val context = instrumentation.targetContext
         val source = File(context.cacheDir, "test4.mp3")
@@ -163,5 +215,11 @@ class VoiceRegressionTest : InstrumentationTestCase() {
         }
         assertTrue(pcm.all { it == 0.25f })
         assertEquals(pcm.size, result.size)
+    }
+
+    private fun nanosToMs(value: Long): Double = value / 1_000_000.0
+
+    private companion object {
+        const val BENCHMARK_REPETITIONS = 3
     }
 }
