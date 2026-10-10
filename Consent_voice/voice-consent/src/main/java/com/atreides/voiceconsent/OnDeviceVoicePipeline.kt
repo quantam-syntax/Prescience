@@ -132,7 +132,11 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
         if (frames.isEmpty()) return emptyList()
         val sortedEnergy = frames.map { it.third }.sorted()
         val noiseFloor = sortedEnergy[sortedEnergy.size / 4]
-        val threshold = maxOf(0.045f, noiseFloor * 1.8f)
+        // Phone microphone capture is commonly far quieter than imported WAVs.
+        // The prior -27 dB absolute floor (0.045) rejected otherwise valid
+        // handset speech before the speaker model could inspect it. Keep an
+        // adaptive noise-relative gate, with only a small anti-silence floor.
+        val threshold = maxOf(0.008f, noiseFloor * 1.8f)
         val active = frames.map { it.third >= threshold }.toMutableList()
         // A speaker embedding needs a phrase, not a syllable. Keep ordinary pauses
         // inside the same turn so the verifier has enough of the speaker's voice.

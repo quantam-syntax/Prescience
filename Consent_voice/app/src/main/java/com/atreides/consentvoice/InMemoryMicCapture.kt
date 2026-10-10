@@ -1,13 +1,16 @@
 package com.atreides.consentvoice
 
+import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import com.atreides.voiceconsent.VOICE_SAMPLE_RATE_HZ
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Captures 16 kHz mono PCM in RAM only. No raw recording is written to disk. */
-class InMemoryMicCapture {
+class InMemoryMicCapture(private val context: Context) {
     private val running = AtomicBoolean(false)
     private val captured = ArrayList<Float>()
     private var recorder: AudioRecord? = null
@@ -30,6 +33,16 @@ class InMemoryMicCapture {
             maxOf(minBuffer, 4_096),
         )
         check(newRecorder.state == AudioRecord.STATE_INITIALIZED) { "Could not open the microphone" }
+        // Prefer the handset microphone for the room-capture demo. Android may
+        // decline this on a particular device, in which case AudioRecord keeps
+        // its platform-selected input route rather than failing the session.
+        val builtInMic = newRecorder.routedDevice?.takeIf { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+        if (builtInMic == null) {
+            val audioManager = context.getSystemService(AudioManager::class.java)
+            audioManager?.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                ?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+                ?.let { newRecorder.preferredDevice = it }
+        }
         recorder = newRecorder
         running.set(true)
         newRecorder.startRecording()
@@ -55,4 +68,11 @@ class InMemoryMicCapture {
     }
 
     fun snapshot(): FloatArray = synchronized(captured) { captured.toFloatArray() }
+
+    /** A bounded, RAM-only tail for live analysis; avoids copying an entire session. */
+    fun recentSnapshot(maxSamples: Int): FloatArray = synchronized(captured) {
+        require(maxSamples > 0)
+        val first = (captured.size - maxSamples).coerceAtLeast(0)
+        FloatArray(captured.size - first) { captured[first + it] }
+    }
 }

@@ -77,7 +77,7 @@ internal fun GuidedVoiceEnrollmentScreen(
     BackHandler(onBack = onCancel)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val capture = remember { InMemoryMicCapture() }
+    val capture = remember { InMemoryMicCapture(context.applicationContext) }
     val acceptedTakes = remember { mutableStateListOf<FloatArray>() }
     var poseIndex by remember { mutableIntStateOf(0) }
     var attempt by remember { mutableIntStateOf(0) }
@@ -129,7 +129,7 @@ internal fun GuidedVoiceEnrollmentScreen(
     }
     LaunchedEffect(guidance.canRecord, phase, whisper, cameraAllowed, microphoneAllowed) {
         if (
-            guidance.canRecord && phase == GuidedEnrollmentPhase.POSITIONING && whisper != null &&
+            guidance.canRecord && phase == GuidedEnrollmentPhase.POSITIONING &&
             cameraAllowed && microphoneAllowed
         ) {
             delay(350)
@@ -166,10 +166,12 @@ internal fun GuidedVoiceEnrollmentScreen(
         val pcm = capture.stop()
         phase = GuidedEnrollmentPhase.VALIDATING
         scope.launch {
-            val recognized = withContext(Dispatchers.Default) {
-                runCatching { requireNotNull(whisper).transcribe(pcm) }.getOrDefault("")
-            }
-            val score = maxOf(
+            val recognized = whisper?.let { model ->
+                withContext(Dispatchers.Default) { runCatching { model.transcribe(pcm) }.getOrDefault("") }
+            }.orEmpty()
+            // Prompt checking is optional; the camera-guided voice samples
+            // remain usable when the full Whisper assets are not installed.
+            val score = if (whisper == null) 1f else maxOf(
                 promptSimilarity(enrollmentPrompts[poseIndex], recognized),
                 promptKeywordCoverage(enrollmentPrompts[poseIndex], recognized),
             )
