@@ -28,12 +28,12 @@ speaker-verification model. Each detected utterance is compared directly with
 the enrolled profile; only a confirmed match is muted. Uncertain speech is
 retained and reported for review.
 
-This handles speakers taking turns. It does not yet separate simultaneous
-voices. The repository contains an ignored offline evaluation copy of
-SpeechBrain SepFormer (`models/separation/speechbrain-sepformer-wsj02mix`), a
-two-speaker separation model. It is not packaged into the APK or integrated
-until it is exported to an Android-compatible runtime and benchmarked on the
-iQOO 15.
+This handles speakers taking turns. An experimental **Test HTP voice
+separation (first 4 seconds)** control is also available for imported audio on
+the iQOO 15. It runs the locally packaged cached SepFormer model through QAIRT
+on the HTP, then provides app-private playback of Source A and Source B. It is
+a listening and device-validation preview only: it does not alter consent
+redaction or export the sources.
 
 Read [the model contract](docs/VOICE_MODEL_CONTRACT.md) and [the redaction contract](docs/REDACTION_INTEGRATION_CONTRACT.md) before changing any interfaces.
 
