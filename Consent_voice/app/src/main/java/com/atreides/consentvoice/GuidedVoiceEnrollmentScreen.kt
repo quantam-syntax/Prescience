@@ -87,7 +87,7 @@ internal fun GuidedVoiceEnrollmentScreen(
     var matchScore by remember { mutableStateOf<Float?>(null) }
     var pendingTake by remember { mutableStateOf<FloatArray?>(null) }
     var whisper by remember { mutableStateOf<WhisperTranscriber?>(null) }
-    var whisperStatus by remember { mutableStateOf("Loading offline Whisper…") }
+    var whisperStatus by remember { mutableStateOf("Checking optional offline prompt checker…") }
     var cameraAllowed by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
@@ -115,9 +115,19 @@ internal fun GuidedVoiceEnrollmentScreen(
         if (!cameraAllowed || !microphoneAllowed) {
             permissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
         }
-        val result = withContext(Dispatchers.Default) { runCatching { WhisperTranscriber(context) } }
-        whisper = result.getOrNull()
-        whisperStatus = if (result.isSuccess) "Offline Whisper ready" else "Whisper unavailable: ${result.exceptionOrNull()?.message}"
+        if (WhisperTranscriber.isAvailable(context)) {
+            val result = withContext(Dispatchers.Default) { runCatching { WhisperTranscriber(context) } }
+            whisper = result.getOrNull()
+            whisperStatus = if (result.isSuccess) {
+                "Offline prompt checker ready"
+            } else {
+                "Prompt checker unavailable; speak naturally for at least 3 seconds"
+            }
+        } else {
+            // The passport does not require transcription. Sherpa treats a missing
+            // model file as a fatal native error, so never instantiate it here.
+            whisperStatus = "Speak naturally for at least 3 seconds; prompt checking is optional"
+        }
     }
     LaunchedEffect(poseIndex, attempt) {
         analyzer.setTargetPose(poses[poseIndex])

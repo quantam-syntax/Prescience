@@ -67,7 +67,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class CaptureMode { ENROLLMENT, SESSION }
+private enum class CaptureMode { SESSION }
 
 @androidx.compose.runtime.Composable
 private fun ConsentVoiceApp() {
@@ -75,7 +75,6 @@ private fun ConsentVoiceApp() {
     var state by remember { mutableStateOf<SessionState>(SessionState.Idle) }
     var persona by remember { mutableStateOf(PersonaEmojiProfile()) }
     var profile by remember { mutableStateOf<List<FloatArray>?>(null) }
-    var enrollmentSamples by remember { mutableStateOf<List<FloatArray>>(emptyList()) }
     var captureMode by remember { mutableStateOf<CaptureMode?>(null) }
     var sessionResult by remember { mutableStateOf("No consent session has been exported.") }
     var liveTranscript by remember { mutableStateOf("") }
@@ -263,7 +262,6 @@ private fun ConsentVoiceApp() {
                                     ?: error("One or more positions did not contain enough clear speech")
                                 passportStore.save(enrolled).getOrThrow()
                                 profile = enrolled
-                                enrollmentSamples = emptyList()
                                 state = SessionState.Idle
                                 "Voice Passport complete: four encrypted position samples are ready. Camera frames and raw enrolment audio were not saved."
                             } finally {
@@ -290,11 +288,6 @@ private fun ConsentVoiceApp() {
                 Text("Voice Consent Studio", style = MaterialTheme.typography.titleMedium)
                 Text("Raw audio stays in memory. Only the consent-sanitized export is written.")
                 Text(livePrivacyStatus, style = MaterialTheme.typography.bodySmall)
-                val passportPositions = listOf(
-                    "front, close to your mouth", "right side, close", "left side, close",
-                    "front, arm's length",
-                )
-                if (profile == null) Text("Voice Passport: ${enrollmentSamples.size}/4 close-range positions accepted", style = MaterialTheme.typography.bodySmall)
                 if (captureMode == null) {
                     Button(
                         onClick = {
@@ -303,29 +296,7 @@ private fun ConsentVoiceApp() {
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text(if (profile == null) "Camera-guided 4-position Voice Passport" else "Re-enroll with camera guidance")
-                    }
-                    Button(onClick = {
-                        runCatching {
-                            // A saved passport can remain available while its
-                            // replacement is captured. Never reset between steps.
-                            if (profile != null && enrollmentSamples.isEmpty()) enrollmentSamples = emptyList()
-                            capture.start()
-                            captureMode = CaptureMode.ENROLLMENT
-                            liveTranscript = ""
-                            state = SessionState.EnrollmentRequired
-                            val step = enrollmentSamples.size.coerceAtMost(passportPositions.lastIndex)
-                            sessionResult = "Voice Passport step ${step + 1}/4: hold the phone ${passportPositions[step]}. Speak naturally for 5-8 seconds, then stop."
-                            sessionResult = "Speak naturally for 5–8 seconds, then stop enrolment."
-                        }.onFailure { sessionResult = "Microphone error: ${it.message}" }
-                    }, modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            when {
-                                enrollmentSamples.isNotEmpty() -> "Record Voice Passport step ${enrollmentSamples.size + 1}/4"
-                                profile != null -> "Re-enrol Voice Passport"
-                                else -> "Start Voice Passport"
-                            },
-                        )
+                        Text(if (profile == null) "Voice Passport with Camera Guidance" else "Replace Voice Passport with Camera Guidance")
                     }
                     Button(
                         enabled = profile != null,
@@ -355,26 +326,6 @@ private fun ConsentVoiceApp() {
                             sessionResult = withContext(Dispatchers.Default) {
                                 runCatching {
                                     when (mode) {
-                                        CaptureMode.ENROLLMENT -> {
-                                            val pipeline = OnDeviceVoicePipeline(context)
-                                            try {
-                                                val sample = pipeline.enrollEmbedding(pcm)
-                                                if (sample == null) {
-                                                    "This position was rejected: not enough clear solo speech. Repeat the same step in a quieter place."
-                                                } else {
-                                                    val next = enrollmentSamples + sample
-                                                    if (next.size == VoicePassportStore.REQUIRED_SAMPLES) {
-                                                        passportStore.save(next).getOrThrow()
-                                                        profile = next
-                                                        enrollmentSamples = emptyList()
-                                                        "Voice Passport complete: 4 encrypted close-range samples saved locally."
-                                                    } else {
-                                                        enrollmentSamples = next
-                                                        "Voice Passport step ${next.size}/4 accepted. Record the next position."
-                                                    }
-                                                }
-                                            } finally { pipeline.close() }
-                                        }
                                         CaptureMode.SESSION -> {
                                             val enrolled = profile ?: error("Complete the Voice Passport first")
                                             val pipeline = OnDeviceVoicePipeline(context)
@@ -404,21 +355,12 @@ private fun ConsentVoiceApp() {
                             }
                         }
                     }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (captureMode == CaptureMode.ENROLLMENT) "Stop and enroll" else "Stop, redact, and export")
+                        Text("Stop, redact, and export")
                     }
                 }
                 if (captureMode != null) {
                     Text("● RECORDING  ${recordingSeconds}s", color = Color(0xFFD32F2F), style = MaterialTheme.typography.titleSmall)
                     Text("Live local transcript: $liveTranscript", style = MaterialTheme.typography.bodySmall)
-                    if (captureMode == CaptureMode.ENROLLMENT) {
-                        TextButton(onClick = {
-                            capture.stop()
-                            captureMode = null
-                            enrollmentSamples = emptyList()
-                            state = SessionState.Idle
-                            sessionResult = "Voice Passport enrolment cancelled. No sample was saved; you can start again."
-                        }) { Text("Cancel enrolment and restart") }
-                    }
                 }
                 Text(sessionResult, style = MaterialTheme.typography.bodySmall)
                 if (sanitizedExport?.exists() == true) {

@@ -39,7 +39,16 @@ class WhisperTranscriber(context: Context) : AutoCloseable {
 
     override fun close() = recognizer.release()
 
-    private companion object {
+    companion object {
         const val MODEL_DIR = "sherpa-onnx-whisper-tiny.en"
+
+        /** Avoid constructing Sherpa when the optional assets are not bundled. */
+        fun isAvailable(context: Context): Boolean = listOf(
+            "$MODEL_DIR/tiny.en-encoder.int8.onnx",
+            "$MODEL_DIR/tiny.en-decoder.int8.onnx",
+            "$MODEL_DIR/tiny.en-tokens.txt",
+        ).all { assetPath ->
+            runCatching { context.assets.open(assetPath).close() }.isSuccess
+        }
     }
 }
