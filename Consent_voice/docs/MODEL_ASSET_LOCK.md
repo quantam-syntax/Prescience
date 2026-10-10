@@ -6,6 +6,9 @@ These are the models packaged in the Android app. They run entirely on-device.
 | --- | --- | ---: | --- |
 | `3dspeaker_eres2net_en_voxceleb_16k.onnx` | English enrolled-speaker verification for each VAD utterance | 26,485,263 | `C59158379255AD66E161679CCA6AF8D52D51E389E3224AB7D7A7BAAE295C2DB5` |
 | `silero_vad.onnx` | Voice activity detection during enrollment | 643,854 | `9E2449E1087496D8D4CABA907F23E0BD3F78D91FA552479BB9C23AC09CBB1FD6` |
+| `sherpa-onnx-whisper-tiny.en/tiny.en-encoder.int8.onnx` | Offline guided-enrollment prompt recognition | 12,937,772 | `0CE578B827C94A961AACB8FA14B02F096504B337E5C94BE37C36238CBE3E8BC6` |
+| `sherpa-onnx-whisper-tiny.en/tiny.en-decoder.int8.onnx` | Offline guided-enrollment prompt recognition | 89,853,865 | `06C0E6FF6348D427E51839219D1C886C18CFDF411E629E33F5E1679BFF9C1527` |
+| `sherpa-onnx-whisper-tiny.en/tiny.en-tokens.txt` | Whisper English token table | 835,554 | `306CD27F03C1A714ECA7108E03D66B7DC042ABE8C258B44C199A7ED9838DD930` |
 
 The active pipeline is Silero VAD utterance segmentation plus direct English
 ERes2Net verification. Pyannote/TitaNet clustering was removed from the mute
@@ -16,6 +19,11 @@ APK.
 
 Changing any active model or preprocessing requires a new enrollment. Voice
 embeddings from a different model are not compatible.
+
+The Whisper assets come from Sherpa-ONNX's official
+`sherpa-onnx-whisper-tiny.en` release archive. Only the INT8 encoder, INT8
+decoder, and token table are packaged. The full-precision weights and bundled
+test recordings are excluded.
 
 ## Offline separation evaluation asset
 
