@@ -5,14 +5,17 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.verticalScroll
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +27,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -31,15 +35,29 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import com.atreides.faceguidance.EnrollmentCameraPose
+import com.atreides.faceguidance.FaceGuidanceAnalyzer
+import com.atreides.faceguidance.FaceGuidanceState
+import com.atreides.faceguidance.GuidanceStatus
 import com.atreides.voiceconsent.PersonaAccessory
 import com.atreides.voiceconsent.PersonaEmojiProfile
 import com.atreides.voiceconsent.PersonaEyes
@@ -56,6 +74,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
+import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,6 +90,7 @@ private enum class CaptureMode { ENROLLMENT, SESSION }
 
 @androidx.compose.runtime.Composable
 private fun ConsentVoiceApp() {
+    var showGuidedEnrollment by remember { mutableStateOf(false) }
     var state by remember { mutableStateOf<SessionState>(SessionState.Idle) }
     var persona by remember { mutableStateOf(PersonaEmojiProfile()) }
     var profile by remember { mutableStateOf<List<FloatArray>?>(null) }
@@ -112,6 +132,33 @@ private fun ConsentVoiceApp() {
             sessionResult = withContext(Dispatchers.IO) {
                 runCatching { SanitizedAudioDownloader.download(context, file) }
                     .getOrElse { "Could not save sanitized audio: ${it.message}" }
+            }
+        }
+    }
+    val enrollmentAudioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            sessionResult = "Loading enrollment recording locallyâ€¦"
+            val pcm = withContext(Dispatchers.Default) {
+                runCatching { ImportedAudioDecoder.decodeTo16kMono(context, uri) }
+            }.getOrElse {
+                sessionResult = "Could not read enrollment recording: ${it.message}"
+                return@launch
+            }
+            sessionResult = withContext(Dispatchers.Default) {
+                runCatching {
+                    val pipeline = OnDeviceVoicePipeline(context)
+                    try {
+                        val enrolled = pipeline.enrollEmbedding(pcm)
+                        if (enrolled == null) {
+                            "Enrollment rejected: not enough clear speech. Select a 30â€“60 second recording containing only your voice."
+                        } else {
+                            profile = listOf(enrolled)
+                            state = SessionState.Idle
+                            "External enrollment imported locally (${enrolled.size}-D embedding). The source recording was not saved."
+                        }
+                    } finally { pipeline.close() }
+                }.getOrElse { "Could not enroll selected recording: ${it.message}" }
             }
         }
     }
@@ -208,6 +255,36 @@ private fun ConsentVoiceApp() {
             }
         } finally { }
     }
+    if (showGuidedEnrollment) {
+        GuidedVoiceEnrollmentScreen(
+            onCancel = { showGuidedEnrollment = false },
+            onCompleted = { guidedTakes ->
+                showGuidedEnrollment = false
+                scope.launch {
+                    sessionResult = "Creating the protected voice profile locally…"
+                    sessionResult = withContext(Dispatchers.Default) {
+                        runCatching {
+                            val pipeline = OnDeviceVoicePipeline(context)
+                            try {
+                                val enrolled = pipeline.enrollEmbedding(guidedTakes)
+                                if (enrolled == null) {
+                                    "Enrollment rejected: one or more takes did not contain enough clear speech. Please try again."
+                                } else {
+                                    passportStore.save(enrolled).getOrThrow()
+                                    profile = enrolled
+                                    state = SessionState.Idle
+                                    "Protected voice enrolled with four position-specific references. Camera frames and recordings were not saved."
+                                }
+                            } finally {
+                                pipeline.close()
+                            }
+                        }.getOrElse { "Could not create the voice profile: ${it.message}" }
+                    }
+                }
+            },
+        )
+        return
+    }
     MaterialTheme {
         Scaffold { padding ->
             Column(
@@ -227,20 +304,23 @@ private fun ConsentVoiceApp() {
                 )
                 if (profile == null) Text("Voice Passport: ${enrollmentSamples.size}/4 close-range positions accepted", style = MaterialTheme.typography.bodySmall)
                 if (captureMode == null) {
-                    Button(onClick = {
-                        runCatching {
-                            if (profile != null) enrollmentSamples = emptyList()
-                            capture.start()
-                            captureMode = CaptureMode.ENROLLMENT
-                            liveTranscript = ""
+                    Button(
+                        onClick = {
                             state = SessionState.EnrollmentRequired
-                            val step = enrollmentSamples.size.coerceAtMost(passportPositions.lastIndex)
-                            sessionResult = "Voice Passport step ${step + 1}/4: hold the phone ${passportPositions[step]}. Speak naturally for 5-8 seconds, then stop."
-                            sessionResult = "Speak naturally for 5–8 seconds, then stop enrolment."
-                        }.onFailure { sessionResult = "Microphone error: ${it.message}" }
-                    }, modifier = Modifier.fillMaxWidth()) {
-                        Text(if (profile != null) "Re-enrol Voice Passport" else if (enrollmentSamples.isEmpty()) "Start Voice Passport" else "Record Voice Passport step ${enrollmentSamples.size + 1}/4")
+                            showGuidedEnrollment = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(if (profile == null) "Enroll protected voice" else "Re-enroll protected voice")
                     }
+                    Button(
+                        onClick = { enrollmentAudioPicker.launch(arrayOf("audio/*")) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Import enrollment recording") }
+                    Text(
+                        "Use a 30–60 second local recording containing only your voice. It is decoded and enrolled on-device; the original is not copied.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Button(
                         enabled = profile != null,
                         onClick = {
@@ -383,6 +463,102 @@ private fun ConsentVoiceApp() {
             }
         }
     }
+}
+
+@androidx.compose.runtime.Composable
+private fun FaceGuidanceScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+    val context = LocalContext.current
+    var permissionGranted by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        permissionGranted = it
+    }
+    val poses = EnrollmentCameraPose.entries
+    var poseIndex by remember { mutableIntStateOf(0) }
+    var guidance by remember {
+        mutableStateOf(FaceGuidanceState(poses.first(), GuidanceStatus.SEARCHING, poses.first().instruction))
+    }
+    val analyzer = remember { FaceGuidanceAnalyzer(poses.first()) { guidance = it } }
+    DisposableEffect(Unit) { onDispose { analyzer.close() } }
+    LaunchedEffect(poseIndex) { analyzer.setTargetPose(poses[poseIndex]) }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (permissionGranted) {
+            GuidanceCameraPreview(analyzer)
+        } else {
+            Button(
+                onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                modifier = Modifier.align(Alignment.Center),
+            ) { Text("Allow camera") }
+        }
+        Button(onClick = onBack, modifier = Modifier.align(Alignment.TopStart).padding(18.dp)) { Text("Back") }
+        Column(
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .background(Color(0xDD10151C), RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Camera positioning guide", color = Color.White, style = MaterialTheme.typography.titleLarge)
+            Text("Step ${poseIndex + 1} of ${poses.size}: ${poses[poseIndex].label}", color = Color(0xFF82D8FF))
+            Text(guidance.message, color = if (guidance.canRecord) Color(0xFF72E6A6) else Color.White)
+            LinearProgressIndicator(progress = { guidance.holdProgress }, modifier = Modifier.fillMaxWidth())
+            Text(
+                "This checks camera position only. Voice recording and audio quality remain part of the enrollment system.",
+                color = Color(0xFFB9C2CC),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(enabled = poseIndex > 0, onClick = { poseIndex-- }, modifier = Modifier.weight(1f)) { Text("Previous") }
+                Button(
+                    enabled = guidance.canRecord,
+                    onClick = { if (poseIndex < poses.lastIndex) poseIndex++ else onBack() },
+                    modifier = Modifier.weight(1f),
+                ) { Text(if (poseIndex == poses.lastIndex) "Finish" else "Position ready") }
+            }
+        }
+    }
+}
+
+@androidx.compose.runtime.Composable
+private fun GuidanceCameraPreview(analyzer: FaceGuidanceAnalyzer) {
+    val context = LocalContext.current
+    val executor = remember { Executors.newSingleThreadExecutor() }
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            cameraProvider?.unbindAll()
+            executor.shutdown()
+        }
+    }
+    LaunchedEffect(previewView) {
+        val view = previewView ?: return@LaunchedEffect
+        val provider = ProcessCameraProvider.getInstance(context).get()
+        cameraProvider = provider
+        val preview = Preview.Builder().build().also { it.surfaceProvider = view.surfaceProvider }
+        val analysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setResolutionSelector(
+                ResolutionSelector.Builder().setResolutionStrategy(
+                    ResolutionStrategy(
+                        android.util.Size(640, 480),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                    ),
+                ).build(),
+            )
+            .build().also { it.setAnalyzer(executor, analyzer) }
+        provider.unbindAll()
+        provider.bindToLifecycle(context as ComponentActivity, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
+    }
+    AndroidView(
+        factory = {
+            PreviewView(it).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+                .also { view -> previewView = view }
+        },
+        modifier = Modifier.fillMaxSize(),
+    )
 }
 
 @androidx.compose.runtime.Composable

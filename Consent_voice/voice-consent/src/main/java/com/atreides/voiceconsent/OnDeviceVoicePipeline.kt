@@ -61,6 +61,13 @@ class OnDeviceVoicePipeline(context: Context) : AutoCloseable {
         return embeddingFor(SpeechSegment(0, speech))
     }
 
+    /** Keeps one normalized reference per position so averaging cannot erase useful voice detail. */
+    fun enrollEmbedding(guidedTakes: List<FloatArray>): List<FloatArray>? {
+        val embeddings = guidedTakes.mapNotNull(::enrollEmbedding)
+        if (embeddings.size != guidedTakes.size || embeddings.isEmpty()) return null
+        return embeddings
+    }
+
     fun decisions(
         pcm16kMono: FloatArray,
         protectedEmbedding: FloatArray,

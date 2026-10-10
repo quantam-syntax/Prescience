@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 rootProject.name = "ConsentVoice"
 include(":app")
 include(":voice-consent")
+include(":face-guidance")

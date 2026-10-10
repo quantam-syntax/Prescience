@@ -14,10 +14,19 @@ The intended offline flow is:
 ## Current state
 
 The Android app records and imports audio, creates a local voice profile, and
-writes a sanitized WAV. The active offline engine uses Silero VAD and the
-English VoxCeleb ERes2Net speaker-verification model. Each detected utterance
-is compared directly with the enrolled profile; only a confirmed match is
-muted. Uncertain speech is retained and reported for review.
+writes a sanitized WAV. Tapping **Enroll protected voice** opens the front
+camera and guides the user through four positions. At each valid position it
+records one in-memory take, displays a transparent word-following prompt, and
+uses the packaged Whisper tiny.en INT8 model to validate the sentence fully
+offline. The four accepted takes are retained as separate ERes2Net reference
+embeddings, allowing recognition to use the closest microphone position
+without averaging away useful voice detail. Neither camera frames nor
+enrollment recordings are saved.
+
+The active offline engine uses Silero VAD and the English VoxCeleb ERes2Net
+speaker-verification model. Each detected utterance is compared directly with
+the enrolled profile; only a confirmed match is muted. Uncertain speech is
+retained and reported for review.
 
 This handles speakers taking turns. It does not yet separate simultaneous
 voices. The repository contains an ignored offline evaluation copy of
