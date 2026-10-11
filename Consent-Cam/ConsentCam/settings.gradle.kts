@@ -24,3 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "Consent-Cam"
 include(":app")
+include(":voice-feature", ":voice-consent", ":face-guidance")
+project(":voice-consent").projectDir = file("../../Consent_voice/voice-consent")
+project(":face-guidance").projectDir = file("../../Consent_voice/face-guidance")

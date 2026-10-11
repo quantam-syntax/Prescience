@@ -91,6 +91,9 @@ import com.example.consent_cam.ble.QrScannerController
 import com.example.consent_cam.ble.PrivacyZonePreset
 import com.example.consent_cam.camera.ConsentCameraController
 import com.example.consent_cam.camera.CameraCapabilities
+import com.example.consent_cam.camera.ProtectedVideoExporter
+import com.example.consent_cam.camera.ProtectedVideoResult
+import com.atreides.consentvoice.VoicePassportStore
 import com.example.consent_cam.privacy.ProximityPrivacyCoordinator
 import com.example.consent_cam.privacy.rendering.FacePixelationOverlay
 import com.example.consent_cam.privacy.rendering.FaceRegionSmoother
@@ -113,6 +116,7 @@ import com.example.consent_cam.recognition.SessionProfile
 import com.consentcam.privacy.api.FaceConsentResolution
 import com.consentcam.privacy.api.PrivacyMode as CorePrivacyMode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -132,7 +136,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppScreen { DASHBOARD, CAMERA, SETTINGS, REVIEW, ENROLLMENT }
+private enum class AppScreen { MODES, DASHBOARD, CAMERA, PROTECTED, SETTINGS, REVIEW, ENROLLMENT }
 private enum class CaptureMode { PHOTO, VIDEO }
 private enum class PrivacyMode(val title: String, val description: String) {
     PROTECTION("Protection", "Protect nearby people when a consent signal is active."),
@@ -165,7 +169,8 @@ private fun ConsentCamApp() {
         FaceRecognitionController(ExactFaceMatcher(faceEmbedder))
     }
     val recognitionState by recognitionController.state.collectAsStateWithLifecycle()
-    var screen by remember { mutableStateOf(AppScreen.CAMERA) }
+    var screen by remember { mutableStateOf(AppScreen.MODES) }
+    var cameraModeScreen by remember { mutableStateOf(AppScreen.CAMERA) }
     var privacyMode by remember {
         mutableStateOf(runCatching {
             PrivacyMode.valueOf(preferences.getString("privacy_mode", null) ?: "")
@@ -174,6 +179,7 @@ private fun ConsentCamApp() {
     var privacyEnabled by remember { mutableStateOf(preferences.getBoolean("privacy_enabled", true)) }
     var lastMedia by remember { mutableStateOf<Uri?>(null) }
     var lastMediaType by remember { mutableStateOf("Photo") }
+    var lastProtectedResult by remember { mutableStateOf<ProtectedVideoResult?>(null) }
     var cameraPermissionGranted by remember { mutableStateOf(hasCameraPermission(context)) }
     var blePermissionsGranted by remember { mutableStateOf(BleConsentController.hasRequiredPermissions(context)) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -248,6 +254,12 @@ private fun ConsentCamApp() {
 
     Surface(color = CameraBlack, modifier = Modifier.fillMaxSize()) {
         when (screen) {
+            AppScreen.MODES -> ModeSelectionScreen(
+                onCamera = { cameraModeScreen = AppScreen.CAMERA; screen = AppScreen.CAMERA },
+                onAudio = { context.startActivity(Intent(context, com.atreides.consentvoice.MainActivity::class.java)) },
+                onProtected = { cameraModeScreen = AppScreen.PROTECTED; screen = AppScreen.PROTECTED },
+                onConsentStatus = { screen = AppScreen.DASHBOARD },
+            )
             AppScreen.DASHBOARD -> DashboardScreen(
                 privacyMode = privacyMode,
                 cameraReady = cameraPermissionGranted,
@@ -255,10 +267,13 @@ private fun ConsentCamApp() {
                 onSetConsent = setConsent,
                 onStartBle = bleController::start,
                 onOpenCamera = { screen = AppScreen.CAMERA },
-                onOpenSettings = { screen = AppScreen.SETTINGS },
+                onOpenSettings = { cameraModeScreen = AppScreen.CAMERA; screen = AppScreen.SETTINGS },
                 onRequestPermissions = requestPermissions,
             )
             AppScreen.CAMERA -> CameraScreen(
+                processingScope = appScope,
+                protectedAudioMode = false,
+                onBackToModes = { screen = AppScreen.MODES },
                 privacyMode = privacyMode,
                 privacyEnabled = privacyEnabled,
                 bleState = bleState,
@@ -270,7 +285,35 @@ private fun ConsentCamApp() {
                 latestMedia = lastMedia,
                 onOpenSettings = { screen = AppScreen.SETTINGS },
                 onCaptureSaved = { uri, type -> lastMedia = uri; lastMediaType = type },
-                onOpenReview = { if (lastMedia != null) screen = AppScreen.REVIEW },
+                onProtectedExport = {},
+                onOpenReview = { if (lastMedia != null) { cameraModeScreen = AppScreen.CAMERA; screen = AppScreen.REVIEW } },
+                onRequestPermissions = requestPermissions,
+                localAiController = localAiController,
+                localAiState = localAiState,
+                thermalLevel = thermalLevel,
+                onCameraSessionActive = bleController::setCameraSessionActive,
+            )
+            AppScreen.PROTECTED -> CameraScreen(
+                processingScope = appScope,
+                protectedAudioMode = true,
+                onBackToModes = { screen = AppScreen.MODES },
+                privacyMode = privacyMode,
+                privacyEnabled = privacyEnabled,
+                bleState = bleState,
+                receivedProfiles = receivedProfiles,
+                recorderIdentity = trustedCameraState.identity,
+                recognitionState = recognitionState,
+                recognitionController = recognitionController,
+                hasPermission = cameraPermissionGranted,
+                latestMedia = lastMedia,
+                onOpenSettings = { cameraModeScreen = AppScreen.PROTECTED; screen = AppScreen.SETTINGS },
+                onCaptureSaved = { uri, type -> lastMedia = uri; lastMediaType = type },
+                onProtectedExport = { result ->
+                    lastMedia = result.uri
+                    lastMediaType = "Protected Video"
+                    lastProtectedResult = result
+                },
+                onOpenReview = { if (lastMedia != null) { cameraModeScreen = AppScreen.PROTECTED; screen = AppScreen.REVIEW } },
                 onRequestPermissions = requestPermissions,
                 localAiController = localAiController,
                 localAiState = localAiState,
@@ -314,9 +357,9 @@ private fun ConsentCamApp() {
                         ),
                     )
                 },
-                onBack = { screen = AppScreen.CAMERA },
+                onBack = { screen = cameraModeScreen },
             )
-            AppScreen.REVIEW -> ReviewScreen(lastMedia, lastMediaType, { screen = AppScreen.CAMERA })
+            AppScreen.REVIEW -> ReviewScreen(lastMedia, lastMediaType, lastProtectedResult, { screen = cameraModeScreen })
             AppScreen.ENROLLMENT -> EnrollmentScreen(
                 enrollmentController = enrollmentController,
                 enrollmentState = enrollmentState,
@@ -346,6 +389,33 @@ private fun requiredAppPermissions(): Array<String> = buildList {
     add(Manifest.permission.RECORD_AUDIO)
     addAll(BleConsentController.requiredPermissions())
 }.toTypedArray()
+
+@Composable
+private fun ModeSelectionScreen(
+    onCamera: () -> Unit,
+    onAudio: () -> Unit,
+    onProtected: () -> Unit,
+    onConsentStatus: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxSize().padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("Prescience", color = IqooYellow, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(10.dp))
+        Text("Choose what to protect", color = Color.White, fontSize = 20.sp)
+        Spacer(Modifier.height(28.dp))
+        Button(onClick = onCamera, modifier = Modifier.fillMaxWidth()) { Text("Consent Cam · blur faces; audio unchanged") }
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onAudio, modifier = Modifier.fillMaxWidth()) { Text("Consent Audio · remove enrolled voice") }
+        Spacer(Modifier.height(12.dp))
+        Button(onClick = onProtected, modifier = Modifier.fillMaxWidth()) { Text("Protected · blur faces and remove voice") }
+        Spacer(Modifier.height(16.dp))
+        Text("Protected video stays private until its audio is processed. If voice processing fails, the video is not published.", color = MutedText, fontSize = 13.sp)
+        Spacer(Modifier.height(24.dp))
+        OutlinedButton(onClick = onConsentStatus, modifier = Modifier.fillMaxWidth()) { Text("BLE consent status and settings", color = IqooYellow) }
+    }
+}
 
 @Composable
 private fun DashboardScreen(
@@ -401,6 +471,9 @@ private fun DashboardScreen(
 
 @Composable
 private fun CameraScreen(
+    processingScope: CoroutineScope,
+    protectedAudioMode: Boolean,
+    onBackToModes: () -> Unit,
     privacyMode: PrivacyMode,
     privacyEnabled: Boolean,
     bleState: BleConsentUiState,
@@ -412,6 +485,7 @@ private fun CameraScreen(
     latestMedia: Uri?,
     onOpenSettings: () -> Unit,
     onCaptureSaved: (Uri, String) -> Unit,
+    onProtectedExport: (ProtectedVideoResult) -> Unit,
     onOpenReview: () -> Unit,
     onRequestPermissions: () -> Unit,
     localAiController: LocalAiController,
@@ -421,6 +495,7 @@ private fun CameraScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraScope = rememberCoroutineScope()
     val controller = remember { ConsentCameraController(context.applicationContext) }
     val privacyCoordinator = remember { ProximityPrivacyCoordinator() }
     val faceRegionSmoother = remember { FaceRegionSmoother() }
@@ -429,7 +504,7 @@ private fun CameraScreen(
     var cameraCapabilities by remember { mutableStateOf(CameraCapabilities()) }
     var selectedZoom by remember { mutableStateOf(1f) }
     var flashEnabled by remember { mutableStateOf(false) }
-    var captureMode by remember { mutableStateOf(CaptureMode.PHOTO) }
+    var captureMode by remember(protectedAudioMode) { mutableStateOf(if (protectedAudioMode) CaptureMode.VIDEO else CaptureMode.PHOTO) }
     var isRecording by remember { mutableStateOf(false) }
     var isCapturing by remember { mutableStateOf(false) }
     var shutterFlash by remember { mutableStateOf(false) }
@@ -644,6 +719,10 @@ private fun CameraScreen(
 
         Column(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 26.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!isRecording && !isCapturing) {
+                    CircleButton("‹", "Modes", onBackToModes)
+                    Spacer(Modifier.width(8.dp))
+                }
                 StatusPill(
                     bleState.ownConsent.label,
                     if (bleState.ownConsent == AppearanceConsent.PROTECT) IqooYellow else SafeGreen,
@@ -657,7 +736,7 @@ private fun CameraScreen(
                     )
                 }
                 Spacer(Modifier.width(10.dp))
-                CircleButton("⚙", "Camera settings", onOpenSettings)
+                if (!isRecording && !isCapturing) CircleButton("⚙", "Camera settings", onOpenSettings)
             }
             Spacer(Modifier.height(16.dp)); PrivacyBadge(
                 privacyMode,
@@ -670,6 +749,13 @@ private fun CameraScreen(
                     } else recognitionState.status
                 } else null,
             )
+            if (protectedAudioMode) {
+                Spacer(Modifier.height(8.dp))
+                StatusPill("Protected: face + voice", IqooYellow)
+            } else {
+                Spacer(Modifier.height(8.dp))
+                StatusPill("Consent Cam: audio unchanged", MutedText)
+            }
             if (isRecording) {
                 Spacer(Modifier.height(9.dp))
                 RecordingBadge(recordingSeconds)
@@ -683,7 +769,11 @@ private fun CameraScreen(
                 )
             }
             Spacer(Modifier.height(18.dp))
-            CaptureModeRow(captureMode) { if (!isRecording) captureMode = it }
+            if (protectedAudioMode) {
+                Text("Protected video only · face masking must be active", color = MutedText, fontSize = 13.sp)
+            } else {
+                CaptureModeRow(captureMode) { if (!isRecording) captureMode = it }
+            }
             Spacer(Modifier.height(16.dp))
             CameraControls(
                 captureMode, isRecording, isCapturing, latestMedia,
@@ -714,13 +804,44 @@ private fun CameraScreen(
                     controller.stopRecording(); isRecording = false
                 } else {
                     val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                    controller.startRecording(hasAudio, requiresProtectedOutput(), {
-                        isRecording = true
-                    }, { uri ->
-                        isRecording = false
-                        Toast.makeText(context, "Video saved to Gallery", Toast.LENGTH_SHORT).show()
-                        onCaptureSaved(uri, "Video")
-                    }, { isRecording = false; cameraError = it })
+                    if (protectedAudioMode && !hasAudio) {
+                        cameraError = "Protected video needs microphone permission so its audio can be sanitized."
+                    } else {
+                        cameraScope.launch {
+                            if (protectedAudioMode) {
+                                isCapturing = true
+                                val enrolled = VoicePassportStore(context).load().isSuccess
+                                isCapturing = false
+                                if (!enrolled) {
+                                    cameraError = "Enroll your voice in Consent Audio before recording Protected video."
+                                    return@launch
+                                }
+                            }
+                            controller.startRecording(hasAudio, protectedAudioMode || requiresProtectedOutput(), protectedAudioMode, {
+                                isRecording = true
+                            }, { uri ->
+                                isRecording = false
+                                if (protectedAudioMode) {
+                                    isCapturing = true
+                                    processingScope.launch {
+                                        runCatching { ProtectedVideoExporter.export(context.applicationContext, uri) }
+                                            .onSuccess { result ->
+                                                onProtectedExport(result)
+                                                Toast.makeText(context, "Protected video saved: ${result.overlapSeparated} overlap separated. Review before sharing; voice may leak.", Toast.LENGTH_LONG).show()
+                                            }
+                                            .onFailure {
+                                                cameraError = "Protected video was not published: ${it.message}"
+                                                Toast.makeText(context, "Protected video was not saved; see camera notice", Toast.LENGTH_LONG).show()
+                                            }
+                                        isCapturing = false
+                                    }
+                                } else {
+                                    Toast.makeText(context, "Video saved to Gallery; audio unchanged", Toast.LENGTH_SHORT).show()
+                                    onCaptureSaved(uri, "Video")
+                                }
+                            }, { isRecording = false; isCapturing = false; cameraError = it })
+                        }
+                    }
                 }
             }
         }
@@ -1233,7 +1354,7 @@ private fun PairingScannerScreen(
 }
 
 @Composable
-private fun ReviewScreen(uri: Uri?, mediaType: String, onBack: () -> Unit) {
+private fun ReviewScreen(uri: Uri?, mediaType: String, protectedResult: ProtectedVideoResult?, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 34.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) { CircleButton("‹", "Back", onBack); Spacer(Modifier.width(16.dp)); Text("Captured $mediaType", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.height(30.dp))
@@ -1244,7 +1365,27 @@ private fun ReviewScreen(uri: Uri?, mediaType: String, onBack: () -> Unit) {
                 SavedMediaPreview(uri, mediaType, Modifier.fillMaxSize())
             }
         }
-        Spacer(Modifier.height(22.dp)); StatusPill("Protected output saved", SafeGreen); Spacer(Modifier.height(12.dp)); Text("Saved locally in the ConsentCam album. The same GPU face protection is applied to preview, photos, and video.", color = MutedText, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(Modifier.height(22.dp)); StatusPill("Protected output saved", SafeGreen); Spacer(Modifier.height(12.dp))
+        Text(
+            if (mediaType == "Protected Video") "Faces were protected in the video and its audio was processed locally. Protected voice may still leak: watch and listen before sharing."
+            else "Saved locally in the ConsentCam album. The same GPU face protection is applied to preview, photos, and video.",
+            color = MutedText, fontSize = 14.sp, lineHeight = 20.sp,
+        )
+        if (mediaType == "Protected Video" && protectedResult != null) {
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Protected-only muted: ${protectedResult.protectedOnlyMuted} · " +
+                    "overlap separated: ${protectedResult.overlapSeparated} · " +
+                    "overlap fully muted for safety: ${protectedResult.overlapFullyMuted}",
+                color = MutedText,
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+            )
+            protectedResult.warning?.let { warning ->
+                Spacer(Modifier.height(8.dp))
+                Text(warning, color = IqooYellow, fontSize = 13.sp)
+            }
+        }
     }
 }
 

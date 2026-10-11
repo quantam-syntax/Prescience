@@ -16,6 +16,20 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class RecognitionDeviceTest {
     @Test
+    fun existingOwnerProfileCanBeDecryptedWithoutChangingIt() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val profile = OwnerProfileStore(context).load().getOrThrow()
+        try {
+            val embedding = profile.embeddingCopy()
+            assertEquals(FACENET_EMBEDDING_DIMENSIONS, embedding.size)
+            assertTrue(EmbeddingMath.isUnitVector(embedding))
+            embedding.fill(0f)
+        } finally {
+            profile.close()
+        }
+    }
+
+    @Test
     fun pairingQrRendersAndDecodesOffline() {
         val value = "consentcam:v1:1234abcd:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
         val bitmap = QrCodeRenderer.render(value, 800)

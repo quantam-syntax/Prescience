@@ -8,6 +8,7 @@ data class SourceAwareRedactionResult(
     val overlapFullyMutedForSafety: Int,
     val backend: SeparatorBackend,
     val warning: String? = null,
+    val identityMatched: Boolean = false,
 )
 
 /**
@@ -123,6 +124,7 @@ class SourceAwareRedactionProcessor(
             overlapSeparated = replacements.size,
             overlapFullyMutedForSafety = selected.protected.size - replacements.size,
             backend = separated.backend,
+            identityMatched = true,
             warning = selected.demoWinner?.let { winner ->
                 "Review before sharing: demo mode selected stream $winner by the stronger Passport score " +
                     "(${formatScore(selected.winnerScore)} vs ${formatScore(selected.otherScore)})."

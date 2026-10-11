@@ -347,6 +347,7 @@ class ConsentCameraController(private val context: Context) {
     fun startRecording(
         withAudio: Boolean,
         requireProtection: Boolean,
+        privateStaging: Boolean,
         onStarted: () -> Unit,
         onSaved: (Uri) -> Unit,
         onError: (String) -> Unit,
@@ -368,12 +369,27 @@ class ConsentCameraController(private val context: Context) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "Movies/ConsentCam")
             }
         }
-        val output = MediaStoreOutputOptions.Builder(
-            context.contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-        ).setContentValues(values).build()
-
-        var pending = capture.output.prepareRecording(context, output)
+        // Combined face+voice mode must not expose the microphone recording in
+        // Gallery before its audio is redacted and remuxed.
+        val staged = if (privateStaging) {
+            runCatching { File.createTempFile("protected-video-", ".mp4", context.cacheDir) }
+                .getOrElse { onError("Could not stage protected recording: ${it.message}"); return }
+        } else null
+        var pending = runCatching {
+            if (staged != null) {
+                capture.output.prepareRecording(context, FileOutputOptions.Builder(staged).build())
+            } else {
+                val output = MediaStoreOutputOptions.Builder(
+                    context.contentResolver,
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                ).setContentValues(values).build()
+                capture.output.prepareRecording(context, output)
+            }
+        }.getOrElse {
+            staged?.delete()
+            onError("Could not prepare video recording: ${it.message}")
+            return
+        }
         if (
             withAudio &&
             ContextCompat.checkSelfPermission(
@@ -383,22 +399,31 @@ class ConsentCameraController(private val context: Context) {
         ) {
             pending = pending.withAudioEnabled()
         }
-        activeRecording = pending.start(mainExecutor) { event ->
+        activeRecording = runCatching { pending.start(mainExecutor) { event ->
             when (event) {
                 is VideoRecordEvent.Start -> onStarted()
                 is VideoRecordEvent.Finalize -> {
                     activeRecording = null
                     if (event.hasError() || protectedOutputFailed) {
-                        discardFailedOutput(
-                            event.outputResults.outputUri,
-                            if (protectedOutputFailed) "Video protection failed" else "Video failed: ${event.error}",
-                            onError,
-                        )
+                        if (staged != null) {
+                            staged.delete()
+                            onError(if (protectedOutputFailed) "Video protection failed; private capture discarded" else "Video failed: ${event.error}; private capture discarded")
+                        } else {
+                            discardFailedOutput(
+                                event.outputResults.outputUri,
+                                if (protectedOutputFailed) "Video protection failed" else "Video failed: ${event.error}",
+                                onError,
+                            )
+                        }
                     } else {
-                        event.outputResults.outputUri.let(onSaved)
+                        (staged?.let(Uri::fromFile) ?: event.outputResults.outputUri).let(onSaved)
                     }
                 }
             }
+        } }.getOrElse {
+            staged?.delete()
+            onError("Could not start video recording: ${it.message}")
+            return
         }
     }
 

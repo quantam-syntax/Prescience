@@ -1,11 +1,11 @@
 [versions]
 agp = "9.4.0"
-coreKtx = "1.10.1"
+coreKtx = "1.15.0"
 junit = "4.13.2"
 junitVersion = "1.1.5"
 espressoCore = "3.5.1"
-lifecycleRuntimeKtx = "2.6.1"
-activityCompose = "1.8.0"
+lifecycleRuntimeKtx = "2.8.7"
+activityCompose = "1.10.0"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
 cameraX = "1.5.0"
@@ -49,4 +49,5 @@ qualcomm-qnn-litert-delegate = { group = "com.qualcomm.qti", name = "qnn-litert-
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
