@@ -24,16 +24,18 @@ without averaging away useful voice detail. Neither camera frames nor
 enrollment recordings are saved.
 
 The active offline engine uses Silero VAD and the English VoxCeleb ERes2Net
-speaker-verification model. Each detected utterance is compared directly with
-the enrolled profile; only a confirmed match is muted. Uncertain speech is
-retained and reported for review.
+speaker-verification model. After recording, the iQOO HTP runs a cached
+two-speaker 16 kHz SepFormer model in overlapping two-second blocks. ERes2Net
+matches the separated streams to the enrolled Voice Passport, and the app
+replaces a matched overlap with the other stream. Protected-only speech and
+unresolved overlap are muted. The retained stream receives a gentle
+cross-stream cleanup filter. Raw separated sources remain in memory; the app
+does not save a source-preview recording.
 
-This handles speakers taking turns. An experimental **Test HTP voice
-separation (first 4 seconds)** control is also available for imported audio on
-the iQOO 15. It runs the locally packaged cached SepFormer model through QAIRT
-on the HTP, then provides app-private playback of Source A and Source B. It is
-a listening and device-validation preview only: it does not alter consent
-redaction or export the sources.
+The clearer 16 kHz path is a review-before-sharing mode, not guaranteed voice
+removal: faint protected speech was audible in a rehearsal clip. The app warns
+that leakage is possible and the entire exported WAV must be listened to
+before sharing. Uncertain unmatched speech is retained and reported for review.
 
 The consent pipeline also has a source-aware boundary: only a successful QAIRT
 HTP result may be used to retain the unprotected separated stream. If the
@@ -50,3 +52,11 @@ Read [the model contract](docs/VOICE_MODEL_CONTRACT.md) and [the redaction contr
 
 No raw recordings, embeddings, model files, experimental checkpoints, or
 credentials belong in Git.
+
+The cached 16 kHz DLC and QAIRT SDK/runtime are private, ignored build inputs.
+After placing them at the paths documented in
+[the clarity evaluation](docs/SEPARATION_CLARITY_EVAL.md), run
+`powershell -ExecutionPolicy Bypass -File scripts/stage_qairt_sepformer.ps1`
+before building the Android app. The locally staged DLC is about 162 MB and
+targets the tested iQOO HTP; an APK built without that asset cannot run the
+separator and must use the mute fallback.

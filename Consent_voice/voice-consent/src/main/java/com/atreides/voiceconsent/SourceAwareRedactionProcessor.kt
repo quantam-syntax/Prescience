@@ -65,17 +65,17 @@ class SourceAwareRedactionProcessor(
         // Demo mode resolves residual matching in both streams by selecting the
         // stronger Passport score, then redacts that whole source from overlaps.
         val selected = when {
-            aProtected.isNotEmpty() && bProtected.isEmpty() -> SelectedSource(aProtected, b, separated.sourceB16k, null)
-            bProtected.isNotEmpty() && aProtected.isEmpty() -> SelectedSource(bProtected, a, separated.sourceA16k, null)
+            aProtected.isNotEmpty() && bProtected.isEmpty() -> SelectedSource(aProtected, b, separated.sourceB16k, separated.sourceA16k, null)
+            bProtected.isNotEmpty() && aProtected.isEmpty() -> SelectedSource(bProtected, a, separated.sourceA16k, separated.sourceB16k, null)
             selectionPolicy == SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO &&
                 aProtected.isNotEmpty() && bProtected.isNotEmpty() && aScore.isFinite() && bScore.isFinite() -> {
                 if (aScore >= bScore) {
-                    SelectedSource(aProtected, b, separated.sourceB16k, "A", aScore, bScore)
+                    SelectedSource(aProtected, b, separated.sourceB16k, separated.sourceA16k, "A", aScore, bScore)
                 } else {
-                    SelectedSource(bProtected, a, separated.sourceA16k, "B", bScore, aScore)
+                    SelectedSource(bProtected, a, separated.sourceA16k, separated.sourceB16k, "B", bScore, aScore)
                 }
             }
-            else -> SelectedSource(emptyList(), emptyList(), FloatArray(0), null)
+            else -> SelectedSource(emptyList(), emptyList(), FloatArray(0), FloatArray(0), null)
         }
         if (selected.protected.isEmpty()) {
             return SourceAwareRedactionResult(
@@ -87,6 +87,22 @@ class SourceAwareRedactionProcessor(
                 warning = "Separated sources did not identify a protected source suitable for replacement",
             )
         }
+        val retainedAudio = runCatching {
+            if (separator is Windowed16kTwoSpeakerSeparator) {
+                CoherentLeakageSuppressor.suppress(selected.retainedAudio, selected.protectedAudio)
+            } else {
+                SeparatedVoiceClarifier.clarify(selected.retainedAudio)
+            }
+        }.getOrElse { error ->
+            return SourceAwareRedactionResult(
+                sanitized = PcmConsentRedactor.redact(mixed, mixedDecisions),
+                protectedOnlyMuted = protectedOnly,
+                overlapSeparated = 0,
+                overlapFullyMutedForSafety = mixedDecisions.count { it.state == SpeechState.OVERLAP },
+                backend = separated.backend,
+                warning = "Separated-source cleanup failed: ${error.message}",
+            )
+        }
         val replacements = selected.protected.mapNotNull { decision ->
             // Do not replace protected-only speech. In demo mode a residual
             // protected match on the retained source is expected, so any speech
@@ -94,7 +110,7 @@ class SourceAwareRedactionProcessor(
             val otherSpeech = selected.other.firstOrNull { intersects(it, decision) } ?: return@mapNotNull null
             val start = decision.startSample.coerceIn(0, mixed.size)
             val end = decision.endSample.coerceIn(start, mixed.size)
-            selected.retainedAudio.copyOfRange(start, end).takeIf { it.isNotEmpty() }?.let {
+            retainedAudio.copyOfRange(start, end).takeIf { it.isNotEmpty() }?.let {
                 LocalReplacementAudio(start, end, it)
             }
         }
@@ -118,6 +134,7 @@ class SourceAwareRedactionProcessor(
         val protected: List<LocalSpeechDecision>,
         val other: List<LocalSpeechDecision>,
         val retainedAudio: FloatArray,
+        val protectedAudio: FloatArray,
         val demoWinner: String?,
         val winnerScore: Float = Float.NaN,
         val otherScore: Float = Float.NaN,

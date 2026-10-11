@@ -5,8 +5,8 @@ import java.io.File
 
 /** Copies the no-compress DLC from the APK only once, because QAIRT requires a filesystem path. */
 object QairtSepformerModel {
-    private const val assetName = "qairt/sepformer-w8a16-sm8850-cached.dlc"
-    private const val modelName = "sepformer-w8a16-sm8850-cached.dlc"
+    private const val assetName = "qairt/sepformer-whamr16k-2s-w16a16-cached.dlc"
+    private const val modelName = "sepformer-whamr16k-2s-w16a16-cached.dlc"
 
     @Synchronized
     fun initialize(context: Context): String? {

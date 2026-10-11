@@ -8,6 +8,8 @@ local.properties
 *.iml
 .idea/
 .venv*/
+__pycache__/
+*.pyc
 .downloads/
 .tools/
 .tmp/

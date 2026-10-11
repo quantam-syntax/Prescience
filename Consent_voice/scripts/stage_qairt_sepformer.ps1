@@ -1,6 +1,6 @@
 param(
     [string]$QairtSdkRoot = (Join-Path $PSScriptRoot "..\\.tools\\qairt\\2.50.40.260831"),
-    [string]$CachedDlc = (Join-Path $PSScriptRoot "..\\models\\qnn-export\\sepformer-dlc\\sepformer-w8a16-sm8850-cached.dlc")
+    [string]$CachedDlc = (Join-Path $PSScriptRoot "..\\models\\qnn-export\\sepformer-whamr16k-2s-w16a16-cached.dlc")
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,6 +21,8 @@ foreach ($name in $libraries) {
 }
 Copy-Item -Force (Join-Path $hexagonLibs "libQairtHtpV81.so") (Join-Path $jniDir "libQairtHtpV81.so")
 Copy-Item -Force (Join-Path $hexagonLibs "libQairtHtpV81Skel.so") (Join-Path $jniDir "libQairtHtpV81Skel.so")
-Copy-Item -Force $CachedDlc (Join-Path $assetDir "sepformer-w8a16-sm8850-cached.dlc")
+Copy-Item -Force $CachedDlc (Join-Path $assetDir "sepformer-whamr16k-2s-w16a16-cached.dlc")
+$legacyAsset = Join-Path $assetDir "sepformer-w8a16-sm8850-cached.dlc"
+if (Test-Path -LiteralPath $legacyAsset) { Remove-Item -LiteralPath $legacyAsset }
 
-Write-Host "Staged QAIRT HTP runtime and cached SepFormer model for arm64-v8a."
+Write-Host "Staged QAIRT HTP runtime and cached 16 kHz SepFormer model for arm64-v8a."

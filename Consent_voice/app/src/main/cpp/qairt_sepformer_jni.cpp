@@ -86,7 +86,7 @@ class SepformerRuntime {
   std::vector<float> separate(const jfloat* samples, size_t count) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!qairt_) throw std::runtime_error("QAIRT SepFormer is not initialized");
-    if (count != kSamples) throw std::runtime_error("SepFormer expects 32,000 samples at 8 kHz");
+    if (count != kSamples) throw std::runtime_error("SepFormer expects 32,000 samples at 16 kHz");
     auto* input = reinterpret_cast<int16_t*>(input_buffer_.data());
     for (size_t i = 0; i < kSamples; ++i) input[i] = quantize(samples[i], input_quant_, input_type_);
     std::vector<std::pair<qairt::SystemContextTensorInfo*, uint8_t*>> inputs{{input_info_, input_buffer_.data()}};
@@ -156,7 +156,7 @@ Java_com_atreides_consentvoice_QairtSepformer_initialize(JNIEnv* env, jobject, j
 extern "C" JNIEXPORT jfloatArray JNICALL
 Java_com_atreides_consentvoice_QairtSepformer_separate(JNIEnv* env, jobject, jfloatArray audio) {
   const jsize size = env->GetArrayLength(audio);
-  if (size != static_cast<jsize>(kSamples)) { throwJava(env, "java/lang/IllegalArgumentException", "Expected 32,000 samples at 8 kHz"); return nullptr; }
+  if (size != static_cast<jsize>(kSamples)) { throwJava(env, "java/lang/IllegalArgumentException", "Expected 32,000 samples at 16 kHz"); return nullptr; }
   jfloat* input = env->GetFloatArrayElements(audio, nullptr);
   try {
     std::vector<float> output = g_runtime.separate(input, size);

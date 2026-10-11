@@ -52,7 +52,7 @@ import com.atreides.voiceconsent.MoonshineTranscriber
 import com.atreides.voiceconsent.PcmConsentRedactor
 import com.atreides.voiceconsent.SourceAwareRedactionProcessor
 import com.atreides.voiceconsent.SourceSelectionPolicy
-import com.atreides.voiceconsent.WindowedTwoSpeakerSeparator
+import com.atreides.voiceconsent.Windowed16kTwoSpeakerSeparator
 import com.atreides.voiceconsent.SpeechState
 import com.atreides.voiceconsent.SessionState
 import com.atreides.voiceconsent.VOICE_SAMPLE_RATE_HZ
@@ -88,9 +88,6 @@ private fun ConsentVoiceApp() {
     val transcriptModelState = remember { mutableStateOf<MoonshineTranscriber?>(null) }
     var transcriptModelStatus by remember { mutableStateOf("Loading local transcript model…") }
     var sanitizedExport by remember { mutableStateOf<java.io.File?>(null) }
-    // The legacy preview launcher remains unreachable while the automatic
-    // source-aware path is validated; it must not persist raw separated audio.
-    var separatedSources by remember { mutableStateOf<List<java.io.File>>(emptyList()) }
     var isPlayingExport by remember { mutableStateOf(false) }
     var playingExportPath by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -119,7 +116,7 @@ private fun ConsentVoiceApp() {
     fun downloadSanitized(file: java.io.File) {
         scope.launch {
             sessionResult = withContext(Dispatchers.IO) {
-                runCatching { SanitizedAudioDownloader.download(context, file) }
+                runCatching { SanitizedAudioDownloader.download(context, file) + ". Protected voice may still leak; listen before sharing." }
                     .getOrElse { "Could not save sanitized audio: ${it.message}" }
             }
         }
@@ -140,7 +137,7 @@ private fun ConsentVoiceApp() {
                 runCatching {
                     val pipeline = OnDeviceVoicePipeline(context)
                     try {
-                        val sourceAware = WindowedTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
+                        val sourceAware = Windowed16kTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
                             SourceAwareRedactionProcessor(
                                 separator,
                                 SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO,
@@ -153,40 +150,12 @@ private fun ConsentVoiceApp() {
                         recordingHistory = SanitizedRecordingHistory.list(context)
                         val npu = if (sourceAware.backend.name == "QAIRT_HTP") "iQOO NPU used" else "NPU unavailable; safe mute fallback"
                         val warning = "${sourceAware.protectedOnlyMuted} protected-only muted; ${sourceAware.overlapSeparated} overlap separated; ${sourceAware.overlapFullyMutedForSafety} overlap fully muted for safety. $npu. ${sourceAware.warning.orEmpty()} "
-                        "${warning}Selected audio processed locally. Review the result before sharing. Tap Play or ↓ to download."
+                        "${warning}Selected audio processed locally with 16 kHz separation. Protected voice may still leak. Listen to the full export before sharing. Tap Play or ↓ to download."
                     } finally { pipeline.close() }
                 }.getOrElse { error ->
                     Log.e("ConsentVoice", "Selected audio sanitization failed", error)
                     "Could not sanitize selected audio: ${error.message}"
                 }
-            }
-        }
-    }
-    val separationPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            sessionResult = "Loading first four seconds for on-device HTP separation…"
-            sessionResult = withContext(Dispatchers.Default) {
-                runCatching {
-                    val pcm16k = ImportedAudioDecoder.decodeTo16kMono(context, uri)
-                    val input8k = FloatArray(QairtSepformer.inputSamples) { index ->
-                        pcm16k.getOrElse(index * 2) { 0f }
-                    }
-                    QairtSepformerModel.initialize(context)?.let { error(it) }
-                    val raw = QairtSepformer.separate(input8k)
-                    require(raw.size == QairtSepformer.inputSamples * QairtSepformer.sources)
-                    // Exported SepFormer output is [time, source].
-                    val sourceA = normalizeForPreview(FloatArray(QairtSepformer.inputSamples) { raw[it * 2] })
-                    val sourceB = normalizeForPreview(FloatArray(QairtSepformer.inputSamples) { raw[it * 2 + 1] })
-                    val folder = java.io.File(context.filesDir, "separation-preview").apply { mkdirs() }
-                    val stamp = System.currentTimeMillis()
-                    val a = java.io.File(folder, "sepformer-source-a-$stamp.wav")
-                    val b = java.io.File(folder, "sepformer-source-b-$stamp.wav")
-                    SanitizedWavWriter.write(a, sourceA, 8_000)
-                    SanitizedWavWriter.write(b, sourceB, 8_000)
-                    separatedSources = listOf(a, b)
-                    "HTP separation complete. Play Source A and Source B; these are the first four seconds only."
-                }.getOrElse { "HTP separation failed: ${it.message}" }
             }
         }
     }
@@ -379,7 +348,7 @@ private fun ConsentVoiceApp() {
                                                 val scoreRange = decisions
                                                     .map { it.score }
                                                     .let { scores -> if (scores.isEmpty()) "n/a" else "${"%.2f".format(scores.min())}–${"%.2f".format(scores.max())}" }
-                                                val sourceAware = WindowedTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
+                                                val sourceAware = Windowed16kTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
                                                     SourceAwareRedactionProcessor(
                                                         separator,
                                                         SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO,
@@ -395,7 +364,7 @@ private fun ConsentVoiceApp() {
                                                 state = SessionState.Idle
                                                 val npu = if (sourceAware.backend.name == "QAIRT_HTP") "iQOO NPU used" else "NPU unavailable; safe mute fallback"
                                                 val warning = "${sourceAware.protectedOnlyMuted} protected-only muted; ${sourceAware.overlapSeparated} overlap separated; ${sourceAware.overlapFullyMutedForSafety} overlap fully muted for safety. $npu. ${sourceAware.warning.orEmpty()} "
-                                                "${warning}Export created. Review the result before sharing. ${export.name} is the only saved audio."
+                                                "${warning}16 kHz export created. Protected voice may still leak. Listen to the full export before sharing. ${export.name} is the only saved audio."
                                             } finally { pipeline.close() }
                                         }
                                     }
@@ -459,13 +428,6 @@ private fun ConsentVoiceApp() {
             }
         }
     }
-}
-
-private fun normalizeForPreview(samples: FloatArray): FloatArray {
-    val peak = samples.maxOfOrNull { kotlin.math.abs(it) } ?: 0f
-    if (peak <= 0f || !peak.isFinite()) return samples
-    val gain = minOf(1f, 0.92f / peak)
-    return FloatArray(samples.size) { samples[it] * gain }
 }
 
 @androidx.compose.runtime.Composable

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import wave
 from pathlib import Path
 
@@ -35,7 +36,11 @@ def main() -> None:
     parser.add_argument("--sample-rate", type=int, default=8000)
     parser.add_argument("--seconds", type=float, default=4.0)
     parser.add_argument("--hop-seconds", type=float, default=2.0)
+    parser.add_argument("--end-aligned-even-spacing", action="store_true")
     args = parser.parse_args()
+
+    if args.sample_rate <= 0 or args.seconds <= 0 or args.hop_seconds <= 0:
+        raise ValueError("Sample rate, window duration, and hop duration must be positive")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     window = round(args.sample_rate * args.seconds)
@@ -45,10 +50,14 @@ def main() -> None:
     for input_path in args.inputs:
         audio, source_rate = read_pcm16_mono(input_path)
         audio = resample_linear(audio, source_rate, args.sample_rate)
-        starts = list(range(0, max(len(audio) - window + 1, 1), hop))
         final_start = max(0, len(audio) - window)
-        if not starts or starts[-1] != final_start:
-            starts.append(final_start)
+        if args.end_aligned_even_spacing:
+            hops = max(1, math.ceil(final_start / hop))
+            starts = sorted({index * final_start // hops for index in range(hops + 1)})
+        else:
+            starts = list(range(0, max(len(audio) - window + 1, 1), hop))
+            if not starts or starts[-1] != final_start:
+                starts.append(final_start)
 
         for index, start in enumerate(starts):
             chunk = audio[start : start + window]

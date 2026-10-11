@@ -1,6 +1,7 @@
 package com.atreides.voiceconsent
 
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -29,8 +30,12 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
         val sourceB = FloatArray(input.size)
         val weights = FloatArray(input.size)
         var previousA: FloatArray? = null
-        var offset = 0
-        while (offset < input.size) {
+        var previousB: FloatArray? = null
+        var previousOffset = 0
+        val finalStart = (input.size - blockSize).coerceAtLeast(0)
+        val hops = maxOf(1, ceil(finalStart.toDouble() / hop).toInt())
+        val starts = (0..hops).map { (it.toLong() * finalStart / hops).toInt() }.distinct()
+        for (offset in starts) {
             val block = FloatArray(blockSize)
             input.copyInto(
                 destination = block,
@@ -42,23 +47,35 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
             if (result !is SeparatorResult.Success || result.sourceA16k.size != blockSize || result.sourceB16k.size != blockSize) {
                 return SeparatorResult.Failed((result as? SeparatorResult.Unavailable)?.reason ?: (result as? SeparatorResult.Failed)?.reason ?: "Invalid separator output")
             }
+            if (result.sourceA16k.any { !it.isFinite() } || result.sourceB16k.any { !it.isFinite() }) {
+                return SeparatorResult.Failed("Separator returned invalid audio")
+            }
             var a = result.sourceA16k
             var b = result.sourceB16k
             previousA?.let { previous ->
-                val compare = minOf(hop, previous.size, a.size)
-                if (correlation(previous, b, compare) > correlation(previous, a, compare)) {
+                val overlap = (previousOffset + blockSize - offset).coerceIn(0, blockSize)
+                val previousStart = offset - previousOffset
+                val other = requireNotNull(previousB)
+                val same = correlation(previous, previousStart, a, overlap) +
+                    correlation(other, previousStart, b, overlap)
+                val swapped = correlation(previous, previousStart, b, overlap) +
+                    correlation(other, previousStart, a, overlap)
+                if (swapped > same + 0.05f) {
                     val temporary = a; a = b; b = temporary
                 }
             }
             val usable = minOf(blockSize, input.size - offset)
             for (index in 0 until usable) {
-                val weight = 0.5f - 0.5f * cos((2.0 * PI * index) / (blockSize - 1)).toFloat()
+                // A small nonzero floor preserves the first and last samples
+                // when only one block contributes at a recording boundary.
+                val weight = 0.02f + 0.98f * (0.5f - 0.5f * cos((2.0 * PI * index) / (blockSize - 1)).toFloat())
                 sourceA[offset + index] += a[index] * weight
                 sourceB[offset + index] += b[index] * weight
                 weights[offset + index] += weight
             }
-            previousA = a.copyOfRange(blockSize - hop, blockSize)
-            offset += hop
+            previousA = a
+            previousB = b
+            previousOffset = offset
         }
         for (index in sourceA.indices) if (weights[index] > 1e-6f) {
             sourceA[index] /= weights[index]
@@ -71,10 +88,16 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
 
     override fun close() = blockSeparator.close()
 
-    private fun correlation(left: FloatArray, right: FloatArray, count: Int): Float {
+    private fun correlation(left: FloatArray, leftStart: Int, right: FloatArray, count: Int): Float {
         var dot = 0.0; var leftNorm = 0.0; var rightNorm = 0.0
-        for (index in 0 until count) { dot += left[index] * right[index]; leftNorm += left[index] * left[index]; rightNorm += right[index] * right[index] }
-        return if (leftNorm == 0.0 || rightNorm == 0.0) -1f else (dot / kotlin.math.sqrt(leftNorm * rightNorm)).toFloat()
+        for (index in 0 until count) {
+            val previous = left[leftStart + index]
+            val current = right[index]
+            dot += previous * current
+            leftNorm += previous * previous
+            rightNorm += current * current
+        }
+        return if (leftNorm == 0.0 || rightNorm == 0.0) 0f else (dot / kotlin.math.sqrt(leftNorm * rightNorm)).toFloat()
     }
 }
 

@@ -1,5 +1,11 @@
 # QNN acceleration baseline and acceptance gates
 
+> Update, 2026-10-11: The sections below document the historical 8 kHz
+> W8A16 experiment. The installed iQOO app now uses the cached 16 kHz,
+> two-second W16A16 HTP model for offline overlap separation. See
+> [the clarity evaluation](SEPARATION_CLARITY_EVAL.md) for its device checks
+> and the review-before-sharing leakage limitation.
+
 ## Current working pipeline
 
 The GitHub `main` implementation remains the reference behavior:

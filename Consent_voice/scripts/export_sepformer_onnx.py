@@ -7,6 +7,7 @@ an application asset until numerical, quality, latency, memory and device tests 
 from __future__ import annotations
 
 import argparse
+import re
 import time
 from pathlib import Path
 
@@ -63,12 +64,16 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path, default=Path("models/qnn-export/sepformer-wsj02mix-4s.onnx"))
     parser.add_argument("--seconds", type=int, default=4)
+    parser.add_argument("--sample-rate", type=int, choices=(8_000, 16_000), default=8_000)
     args = parser.parse_args()
 
     if args.seconds < 1:
         raise ValueError("--seconds must be positive")
-    sample_rate = 8_000
-    sample_count = sample_rate * args.seconds
+    checkpoint_yaml = (args.checkpoint_dir / "hyperparams.yaml").read_text(encoding="utf-8")
+    rate_match = re.search(r"^sample_rate:\s*(\d+)\s*$", checkpoint_yaml, re.MULTILINE)
+    if rate_match is None or int(rate_match.group(1)) != args.sample_rate:
+        raise ValueError("--sample-rate must match the checkpoint's sample_rate")
+    sample_count = args.sample_rate * args.seconds
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     # Disable the inference-only fused attention path so ONNX sees portable operators.
@@ -86,8 +91,8 @@ def main() -> None:
         model,
         (example,),
         args.output,
-        input_names=["mixture_8khz"],
-        output_names=["sources_8khz"],
+        input_names=[f"mixture_{args.sample_rate}hz"],
+        output_names=[f"sources_{args.sample_rate}hz"],
         opset_version=17,
         do_constant_folding=True,
         dynamic_axes=None,
@@ -99,7 +104,7 @@ def main() -> None:
 
     session = ort.InferenceSession(str(args.output), providers=["CPUExecutionProvider"])
     started = time.perf_counter()
-    candidate = session.run(["sources_8khz"], {"mixture_8khz": example.numpy()})[0]
+    candidate = session.run(None, {session.get_inputs()[0].name: example.numpy()})[0]
     onnx_ms = (time.perf_counter() - started) * 1_000
     max_error = float(np.max(np.abs(reference - candidate)))
     cosine = float(np.dot(reference.ravel(), candidate.ravel()) / (
