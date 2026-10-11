@@ -6,6 +6,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
 import com.atreides.voiceconsent.VOICE_SAMPLE_RATE_HZ
+import com.atreides.voiceconsent.resamplePcm
 import java.nio.ByteOrder
 
 /** Decodes a user-selected local audio file to 16 kHz mono PCM in RAM. */
@@ -71,18 +72,6 @@ object ImportedAudioDecoder {
             extractor.release()
         }
         check(pcm.isNotEmpty()) { "No audible PCM was decoded from this file" }
-        return resample(pcm.toFloatArray(), sourceRate)
-    }
-
-    private fun resample(input: FloatArray, sourceRate: Int): FloatArray {
-        if (sourceRate == VOICE_SAMPLE_RATE_HZ) return input
-        val outputSize = (input.size.toLong() * VOICE_SAMPLE_RATE_HZ / sourceRate).toInt()
-        return FloatArray(outputSize) { index ->
-            val position = index.toDouble() * sourceRate / VOICE_SAMPLE_RATE_HZ
-            val left = position.toInt().coerceIn(0, input.lastIndex)
-            val right = (left + 1).coerceAtMost(input.lastIndex)
-            val fraction = (position - left).toFloat()
-            input[left] * (1f - fraction) + input[right] * fraction
-        }
+        return resamplePcm(pcm.toFloatArray(), sourceRate, VOICE_SAMPLE_RATE_HZ)
     }
 }

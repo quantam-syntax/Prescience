@@ -22,7 +22,7 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
     override fun separate(pcm16kMono: FloatArray): SeparatorResult {
         if (!status.available) return SeparatorResult.Unavailable(status.detail)
         if (pcm16kMono.isEmpty() || pcm16kMono.any { !it.isFinite() }) return SeparatorResult.Failed("Invalid PCM input")
-        val input = resample(pcm16kMono, VOICE_SAMPLE_RATE_HZ, 8_000)
+        val input = resamplePcm(pcm16kMono, VOICE_SAMPLE_RATE_HZ, 8_000)
         val blockSize = 32_000
         val hop = 16_000
         val sourceA = FloatArray(input.size)
@@ -64,8 +64,8 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
             sourceA[index] /= weights[index]
             sourceB[index] /= weights[index]
         }
-        val a16 = resample(sourceA, 8_000, VOICE_SAMPLE_RATE_HZ).copyOf(pcm16kMono.size)
-        val b16 = resample(sourceB, 8_000, VOICE_SAMPLE_RATE_HZ).copyOf(pcm16kMono.size)
+        val a16 = resamplePcm(sourceA, 8_000, VOICE_SAMPLE_RATE_HZ).copyOf(pcm16kMono.size)
+        val b16 = resamplePcm(sourceB, 8_000, VOICE_SAMPLE_RATE_HZ).copyOf(pcm16kMono.size)
         return SeparatorResult.Success(a16, b16, SeparatorBackend.QAIRT_HTP)
     }
 
@@ -78,7 +78,8 @@ class WindowedTwoSpeakerSeparator(private val blockSeparator: FixedShape8kSepara
     }
 }
 
-internal fun resample(input: FloatArray, inputRate: Int, outputRate: Int): FloatArray {
+fun resamplePcm(input: FloatArray, inputRate: Int, outputRate: Int): FloatArray {
+    require(inputRate > 0 && outputRate > 0)
     if (inputRate == outputRate) return input.copyOf()
     val outputSize = ((input.size.toLong() * outputRate + inputRate / 2) / inputRate).toInt()
     if (input.isEmpty()) return FloatArray(outputSize)
