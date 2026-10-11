@@ -7,8 +7,17 @@ import android.content.Intent
 import android.content.Context
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import com.atreides.consentvoice.VoicePassportStore
+import com.example.consent_cam.recognition.OwnerProfileStore
+import com.example.consent_cam.recognition.TrustedCameraStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class BleConsentService : Service() {
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     override fun onCreate() {
         super.onCreate()
         createChannel()
@@ -30,6 +39,23 @@ class BleConsentService : Service() {
         }.getOrDefault(AppearanceConsent.OFF)
         controller.setConsent(consent)
         controller.start()
+        serviceScope.launch {
+            val faceStore = OwnerProfileStore(this@BleConsentService)
+            val face = if (faceStore.hasProfile()) faceStore.load().getOrNull() else null
+            try {
+                val trust = TrustedCameraStore(this@BleConsentService).apply { load() }.state.value
+                val sharedFace = face?.withTrustMetadata(
+                    identity = trust.identity,
+                    name = trust.displayName,
+                    trustedCameras = trust.cameras.map { it.identity }.toSet(),
+                )
+                try { controller.setOwnerProfile(sharedFace) }
+                finally { sharedFace?.close() }
+            } finally { face?.close() }
+            val samples = VoicePassportStore(this@BleConsentService).load().getOrNull()
+            try { controller.setOwnerVoicePassport(samples) }
+            finally { samples?.forEach { it.fill(0f) } }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -45,6 +71,7 @@ class BleConsentService : Service() {
     }
 
     override fun onDestroy() {
+        serviceScope.cancel()
         BleConsentRuntime.controller(this).stop()
         super.onDestroy()
     }

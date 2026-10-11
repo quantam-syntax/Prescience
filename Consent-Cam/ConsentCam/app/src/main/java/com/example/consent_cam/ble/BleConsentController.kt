@@ -27,6 +27,7 @@ import com.consentcam.ble.proximity.ProximityTracker
 import com.example.consent_cam.recognition.EnrollmentProfile
 import com.example.consent_cam.recognition.EnrollmentProfileCodec
 import com.example.consent_cam.recognition.SessionProfile
+import com.example.consent_cam.recognition.duplicateFaceEnrollmentSessionIds
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,12 @@ enum class AppearanceConsent(val label: String, internal val flags: UByte?) {
     OFF("OFF", null),
     ALLOW("ALLOW", ConsentFlags.ALLOW_APPEARANCE.toUByte()),
     PROTECT("PROTECT", 0u),
+    MUTE("MUTE VOICE", (ConsentFlags.ALLOW_APPEARANCE or ConsentFlags.MUTE_VOICE).toUByte()),
+    BOTH("FACE + VOICE", ConsentFlags.MUTE_VOICE.toUByte()),
+    ;
+
+    val protectsFace: Boolean get() = this == PROTECT || this == BOTH
+    val protectsVoice: Boolean get() = this == MUTE || this == BOTH
 }
 
 data class BleConsentUiState(
@@ -55,11 +62,13 @@ data class BleConsentUiState(
     val acceptedTokenCount: Int = 0,
     val nearbySessionCount: Int = 0,
     val nearbyProtectCount: Int = 0,
+    val nearbyVoiceProtectCount: Int = 0,
     val proximityBand: ProximityBand = ProximityBand.LOST,
     val smoothedRssi: Double? = null,
     val protectionActive: Boolean = false,
     val preciseProfileAvailable: Boolean = false,
     val preciseProfileCount: Int = 0,
+    val voiceProfileCount: Int = 0,
     val preciseMatchingActive: Boolean = false,
     val preciseStatus: String = "Waiting for nearby enrolled phones",
     val privacyZonePreset: PrivacyZonePreset = PrivacyZonePreset.FAR,
@@ -84,11 +93,13 @@ class BleConsentController(context: Context) : AutoCloseable {
     private val mutableState = MutableStateFlow(BleConsentUiState())
     private val profileLock = Any()
     private val profilesBySession = mutableMapOf<UInt, SessionProfile>()
+    private val voiceProfilesBySession = mutableMapOf<UInt, NearbyVoiceProfile>()
     private val mutablePreciseProfiles = MutableStateFlow<List<SessionProfile>>(emptyList())
     private val preciseTransport = PreciseProfileTransport(
         context = appContext,
         onStatus = { status -> mutableState.value = mutableState.value.copy(preciseStatus = status) },
         onProfile = ::storePreciseProfile,
+        onVoiceProfile = ::storeVoiceProfile,
         onProfileRemoved = ::removePreciseProfile,
     )
 
@@ -102,7 +113,10 @@ class BleConsentController(context: Context) : AutoCloseable {
     private var started = false
     private var acceptedTokenCount = 0
     private var advertisedCounter = -1L
+    private var lastValidAdvertisementMs = 0L
+    private var lastScanRecoveryMs = 0L
     private var ownerProfileBytes: ByteArray? = null
+    private var ownerVoiceSamples: List<FloatArray>? = null
     private val preciseProfileLostSinceMs = mutableMapOf<UInt, Long>()
     @Volatile private var cameraSessionActive = false
 
@@ -116,6 +130,7 @@ class BleConsentController(context: Context) : AutoCloseable {
         }
 
         override fun onScanFailed(errorCode: Int) {
+            scanner = null
             mutableState.value = mutableState.value.copy(
                 scanning = false,
                 status = "BLE scan failed ($errorCode)",
@@ -158,6 +173,7 @@ class BleConsentController(context: Context) : AutoCloseable {
             while (isActive) {
                 delay(1_000)
                 refreshNearbyState()
+                recoverScanningIfNeeded()
                 val counter = System.currentTimeMillis() / 1_000L / 30L
                 if (counter != advertisedCounter) restartAdvertising(newSession = false)
             }
@@ -187,6 +203,12 @@ class BleConsentController(context: Context) : AutoCloseable {
             scanning = false,
             status = "BLE consent exchange stopped",
         )
+    }
+
+    /** A real retry, including a scanner reported ON but no longer delivering advertisements. */
+    fun retry() {
+        if (started) stop()
+        start()
     }
 
     @SuppressLint("MissingPermission")
@@ -219,6 +241,27 @@ class BleConsentController(context: Context) : AutoCloseable {
         if (started) restartAdvertising(newSession = true)
     }
 
+    fun setOwnerVoicePassport(samples: List<FloatArray>?) {
+        ownerVoiceSamples?.forEach { it.fill(0f) }
+        val valid = samples?.let { candidate ->
+            runCatching { NearbyProtectionPayload.encode(null, candidate).fill(0) }.isSuccess
+        } ?: false
+        ownerVoiceSamples = if (valid) samples?.map(FloatArray::copyOf) else null
+        if (samples != null && !valid) {
+            mutableState.value = mutableState.value.copy(status = "Voice Passport is incompatible; voice profile was not broadcast")
+        }
+        if (started) restartAdvertising(newSession = true)
+    }
+
+    /** Snapshot only in-zone voice requests at shutter time; caller closes after export. */
+    fun activeVoiceRequests(): List<NearbyVoiceRequest> {
+        val active = directRegistry.activeSessions(SystemClock.elapsedRealtime())
+        return synchronized(profileLock) {
+            active.filter { it.voiceMuteRequested && it.proximity.insidePrivacyZone }
+                .map { session -> NearbyVoiceRequest(session.sessionId, voiceProfilesBySession[session.sessionId]?.copySamples()) }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun restartAdvertising(newSession: Boolean) {
         val ownConsent = mutableState.value.ownConsent
@@ -234,18 +277,24 @@ class BleConsentController(context: Context) : AutoCloseable {
         advertiserCallback = null
         if (newSession || broadcastSession == null) {
             broadcastSession?.close()
-            val preciseAvailable = ownerProfileBytes != null
+            val face = ownerProfileBytes.takeIf { ownConsent == AppearanceConsent.ALLOW || ownConsent.protectsFace }
+            val voice = ownerVoiceSamples.takeIf { ownConsent.protectsVoice }
+            val preciseAvailable = face != null
+            val voiceAvailable = voice != null
             val flags = (
                 requireNotNull(ownConsent.flags).toInt() or
-                    if (preciseAvailable) ConsentFlags.PRECISE_MATCH_AVAILABLE else 0
+                    (if (preciseAvailable) ConsentFlags.PRECISE_MATCH_AVAILABLE else 0) or
+                    (if (voiceAvailable) ConsentFlags.VOICE_PROFILE_AVAILABLE else 0)
                 ).toUByte()
             broadcastSession = ConsentBroadcastSession.create(flags)
             ownSessionIds += requireNotNull(broadcastSession).sessionId
-            if (preciseAvailable) {
+            if (preciseAvailable || voiceAvailable) {
+                val encoded = NearbyProtectionPayload.encode(face, voice)
                 preciseTransport.startServer(
                     sessionId = requireNotNull(broadcastSession).sessionId,
-                    encodedProfile = requireNotNull(ownerProfileBytes),
+                    encodedProfile = encoded,
                 )
+                encoded.fill(0)
             } else {
                 preciseTransport.stopServer()
             }
@@ -264,7 +313,8 @@ class BleConsentController(context: Context) : AutoCloseable {
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(ownerProfileBytes != null)
+            .setConnectable((ownerProfileBytes != null && (ownConsent == AppearanceConsent.ALLOW || ownConsent.protectsFace)) ||
+                (ownerVoiceSamples != null && ownConsent.protectsVoice))
             .setTimeout(0)
             .build()
         val callback = object : AdvertiseCallback() {
@@ -288,11 +338,11 @@ class BleConsentController(context: Context) : AutoCloseable {
 
     @SuppressLint("MissingPermission")
     private fun startScanning() {
+        if (!started || !hasRequiredPermissions(appContext) || bluetoothAdapter?.isEnabled != true) return
         val activeScanner = bluetoothAdapter?.bluetoothLeScanner ?: run {
-            mutableState.value = mutableState.value.copy(status = "BLE scanner unavailable")
+            mutableState.value = mutableState.value.copy(scanning = false, status = "BLE scanner unavailable")
             return
         }
-        scanner = activeScanner
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .setReportDelay(0)
@@ -300,8 +350,33 @@ class BleConsentController(context: Context) : AutoCloseable {
         // Some OriginOS builds do not match a 128-bit UUID carried only in the
         // service-data AD structure. Scan unfiltered, then accept only our exact
         // UUID and validated 10-byte protocol payload in acceptScan().
-        activeScanner.startScan(emptyList(), settings, scanCallback)
-        mutableState.value = mutableState.value.copy(scanning = true)
+        runCatching { activeScanner.startScan(emptyList(), settings, scanCallback) }
+            .onSuccess {
+                scanner = activeScanner
+                lastValidAdvertisementMs = SystemClock.elapsedRealtime()
+                mutableState.value = mutableState.value.copy(scanning = true)
+            }
+            .onFailure {
+                scanner = null
+                mutableState.value = mutableState.value.copy(scanning = false, status = "BLE scanner could not start: ${it.message}")
+            }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun recoverScanningIfNeeded() {
+        if (!started || !hasRequiredPermissions(appContext) || bluetoothAdapter?.isEnabled != true) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastScanRecoveryMs < SCAN_RECOVERY_COOLDOWN_MS) return
+        val silent = mutableState.value.scanning &&
+            now - lastValidAdvertisementMs >= SCAN_STALE_MS &&
+            directRegistry.activeSessions(now).isEmpty()
+        if (!mutableState.value.scanning || silent) {
+            scanner?.let { runCatching { it.stopScan(scanCallback) } }
+            scanner = null
+            lastScanRecoveryMs = now
+            mutableState.value = mutableState.value.copy(scanning = false, status = "Recovering BLE scanner")
+            startScanning()
+        }
     }
 
     private fun acceptScan(result: ScanResult) {
@@ -310,6 +385,7 @@ class BleConsentController(context: Context) : AutoCloseable {
         if (decoded !is ConsentAdvertisementCodec.DecodeResult.Success) return
         val advertisement = decoded.advertisement
         if (advertisement.sessionId in ownSessionIds) return
+        lastValidAdvertisementMs = SystemClock.elapsedRealtime()
         preciseTransport.observe(
             device = result.device,
             advertisement = advertisement,
@@ -322,7 +398,7 @@ class BleConsentController(context: Context) : AutoCloseable {
             acceptedTokenCount = acceptedTokenCount,
             proximityBand = observed.proximity.band,
             smoothedRssi = observed.proximity.smoothedRssi,
-            status = "Accepted BLE v1 token (${if (ConsentFlags.isAllow(advertisement.flags)) "ALLOW" else "PROTECT"})",
+            status = "Accepted BLE consent signal",
         )
         refreshNearbyState()
     }
@@ -332,6 +408,13 @@ class BleConsentController(context: Context) : AutoCloseable {
         val active = directRegistry.activeSessions(now)
         val nearbyProtect = active.count { session ->
             session.consent == ConsentStatus.PROTECT && session.proximity.insidePrivacyZone
+        }
+        val nearbyVoiceProtect = active.count { it.voiceMuteRequested && it.proximity.insidePrivacyZone }
+        val activeVoiceProfiles = synchronized(profileLock) {
+            active.count { session ->
+                session.voiceMuteRequested && session.proximity.insidePrivacyZone &&
+                    voiceProfilesBySession.containsKey(session.sessionId)
+            }
         }
         val strongest = active.maxByOrNull { it.proximity.smoothedRssi }?.proximity
         val activeIds = active.mapTo(mutableSetOf()) { it.sessionId }
@@ -347,6 +430,10 @@ class BleConsentController(context: Context) : AutoCloseable {
                 }
             }
         }
+        val storedVoiceProfiles = synchronized(profileLock) { voiceProfilesBySession.values.toList() }
+        storedVoiceProfiles.forEach { profile ->
+            if (profile.sessionId !in activeIds && !cameraSessionActive) removePreciseProfile(profile.sessionId)
+        }
         val preciseProtectInsideZone = active.any { session ->
             session.consent == ConsentStatus.PROTECT &&
                 session.proximity.insidePrivacyZone &&
@@ -355,6 +442,8 @@ class BleConsentController(context: Context) : AutoCloseable {
         mutableState.value = mutableState.value.copy(
             nearbySessionCount = active.size,
             nearbyProtectCount = nearbyProtect,
+            nearbyVoiceProtectCount = nearbyVoiceProtect,
+            voiceProfileCount = activeVoiceProfiles,
             proximityBand = strongest?.band ?: ProximityBand.LOST,
             smoothedRssi = strongest?.smoothedRssi,
             protectionActive = nearbyProtect > 0,
@@ -367,7 +456,7 @@ class BleConsentController(context: Context) : AutoCloseable {
         if (cameraSessionActive == active) return
         cameraSessionActive = active
         if (!active) {
-            val sessionIds = synchronized(profileLock) { profilesBySession.keys.toList() }
+            val sessionIds = synchronized(profileLock) { (profilesBySession.keys + voiceProfilesBySession.keys).distinct() }
             sessionIds.forEach(::removePreciseProfile)
             preciseProfileLostSinceMs.clear()
         }
@@ -390,14 +479,33 @@ class BleConsentController(context: Context) : AutoCloseable {
 
     private fun storePreciseProfile(profile: SessionProfile) {
         synchronized(profileLock) {
+            // A restarted broadcaster gets a new BLE session ID but sends the same enrolled face.
+            // Retaining both makes the selector demand two distinct protected faces and can
+            // associate the second session with an unrelated bystander.
+            val duplicateIds = duplicateFaceEnrollmentSessionIds(profilesBySession.values, profile)
+            duplicateIds.forEach { sessionId ->
+                profilesBySession.remove(sessionId)?.close()
+                voiceProfilesBySession.remove(sessionId)?.close()
+                preciseProfileLostSinceMs.remove(sessionId)
+            }
             profilesBySession.put(profile.sessionId, profile)?.close()
+            mutableState.value = mutableState.value.copy(voiceProfileCount = voiceProfilesBySession.size)
             publishPreciseProfilesLocked()
+        }
+    }
+
+    private fun storeVoiceProfile(profile: NearbyVoiceProfile) {
+        synchronized(profileLock) {
+            voiceProfilesBySession.put(profile.sessionId, profile)?.close()
+            mutableState.value = mutableState.value.copy(voiceProfileCount = voiceProfilesBySession.size)
         }
     }
 
     private fun removePreciseProfile(sessionId: UInt) {
         synchronized(profileLock) {
             profilesBySession.remove(sessionId)?.close()
+            voiceProfilesBySession.remove(sessionId)?.close()
+            mutableState.value = mutableState.value.copy(voiceProfileCount = voiceProfilesBySession.size)
             publishPreciseProfilesLocked()
         }
         preciseTransport.forgetSession(sessionId)
@@ -420,11 +528,15 @@ class BleConsentController(context: Context) : AutoCloseable {
         synchronized(profileLock) {
             profilesBySession.values.forEach(SessionProfile::close)
             profilesBySession.clear()
+            voiceProfilesBySession.values.forEach(NearbyVoiceProfile::close)
+            voiceProfilesBySession.clear()
             mutablePreciseProfiles.value = emptyList()
         }
         preciseProfileLostSinceMs.clear()
         ownerProfileBytes?.fill(0)
         ownerProfileBytes = null
+        ownerVoiceSamples?.forEach { it.fill(0f) }
+        ownerVoiceSamples = null
         ownSessionIds.clear()
     }
 
@@ -432,6 +544,8 @@ class BleConsentController(context: Context) : AutoCloseable {
         // The RSSI registry already retains an eight-second signal-loss grace.
         // Keeping a stale PROTECT embedding beyond it can override a new ALLOW session.
         private const val PRECISE_PROFILE_LOST_GRACE_MS = 0L
+        private const val SCAN_RECOVERY_COOLDOWN_MS = 10_000L
+        private const val SCAN_STALE_MS = 45_000L
         fun requiredPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_SCAN,

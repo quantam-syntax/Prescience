@@ -142,6 +142,10 @@ class SessionProfile(
 
     fun embeddingCopy(): FloatArray = mutableEmbedding.copyOf()
 
+    /** Exact equality identifies a retransmission of one enrollment, not a similar-looking person. */
+    fun hasSameFaceEnrollmentAs(other: SessionProfile): Boolean =
+        modelId == other.modelId && mutableEmbedding.contentEquals(other.mutableEmbedding)
+
     fun copyForConsumer(): SessionProfile = SessionProfile(
         sessionId = sessionId,
         consent = consent,
@@ -159,6 +163,13 @@ class SessionProfile(
         mutableEmbedding.fill(0f)
     }
 }
+
+fun duplicateFaceEnrollmentSessionIds(
+    existingProfiles: Collection<SessionProfile>,
+    incoming: SessionProfile,
+): List<UInt> = existingProfiles
+    .filter { it.sessionId != incoming.sessionId && it.hasSameFaceEnrollmentAs(incoming) }
+    .map(SessionProfile::sessionId)
 
 interface FaceEmbedder : AutoCloseable {
     suspend fun embed(alignedFace: Bitmap): Result<FloatArray>

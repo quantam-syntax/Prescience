@@ -171,7 +171,7 @@ class FaceRecognitionController(
         val bestScore = visibleMatches.mapNotNull(FaceMatch::similarity).maxOrNull()
         val scoreSuffix = bestScore?.let { " - score ${String.format(Locale.US, "%.3f", it)}" }.orEmpty()
         val protectSessionIds = activeProfiles
-            .filter { it.consent == com.example.consent_cam.ble.AppearanceConsent.PROTECT }
+            .filter { it.consent.protectsFace }
             .mapTo(mutableSetOf(), SessionProfile::sessionId)
         val protectedIds = selector.selectAll(visibleMatches, protectSessionIds)
         mutableState.value = if (protectedIds != null && protectedIds.isNotEmpty()) {

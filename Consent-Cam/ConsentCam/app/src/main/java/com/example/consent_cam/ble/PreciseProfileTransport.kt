@@ -38,6 +38,7 @@ class PreciseProfileTransport(
     context: Context,
     private val onStatus: (String) -> Unit,
     private val onProfile: (SessionProfile) -> Unit,
+    private val onVoiceProfile: (NearbyVoiceProfile) -> Unit,
     @Suppress("UNUSED_PARAMETER") onProfileRemoved: (UInt) -> Unit,
 ) : AutoCloseable {
     private data class ServerPayload(
@@ -237,12 +238,18 @@ class PreciseProfileTransport(
         if (connectingAddress != null && now - connectionStartedMs >= TRANSFER_TIMEOUT_MS) {
             failClient("Face profile transfer timed out; retrying nearby phones")
         }
-        if (!ConsentFlags.hasPreciseMatch(advertisement.flags) || advertisement.sessionId in receivedSessionIds || connectingAddress != null) return
+        if ((!ConsentFlags.hasPreciseMatch(advertisement.flags) && !ConsentFlags.hasVoiceProfile(advertisement.flags)) ||
+            advertisement.sessionId in receivedSessionIds || connectingAddress != null) return
         if (now - (lastAttemptBySession[advertisement.sessionId] ?: 0L) < RETRY_DELAY_MS) return
         lastAttemptBySession[advertisement.sessionId] = now
         pendingSession = PendingSession(
             advertisement.sessionId,
-            if (ConsentFlags.isAllow(advertisement.flags)) AppearanceConsent.ALLOW else AppearanceConsent.PROTECT,
+            when {
+                ConsentFlags.mutesVoice(advertisement.flags) && ConsentFlags.isAllow(advertisement.flags) -> AppearanceConsent.MUTE
+                ConsentFlags.mutesVoice(advertisement.flags) -> AppearanceConsent.BOTH
+                ConsentFlags.isAllow(advertisement.flags) -> AppearanceConsent.ALLOW
+                else -> AppearanceConsent.PROTECT
+            },
         )
         connectingAddress = device.address
         connectionStartedMs = now
@@ -338,29 +345,37 @@ class PreciseProfileTransport(
             encrypted.close()
             transportBytes.fill(0)
         } ?: return failClient("Face profile authentication failed")
-        val enrollment = try { EnrollmentProfileCodec.decode(plaintext) } finally { plaintext.fill(0) }
-            ?: return failClient("Face profile model was incompatible")
-        val embedding = enrollment.embeddingCopy()
-        val profile = try {
-            SessionProfile(
-                sessionId = pending.sessionId,
-                consent = pending.consent,
-                modelId = enrollment.modelId,
-                embedding = embedding,
-                presentation = enrollment.presentation,
-                avatarStyle = enrollment.avatarStyle,
-                avatarPreset = enrollment.avatarPreset,
-                deviceIdentity = enrollment.deviceIdentity,
-                displayName = enrollment.displayName,
-                trustedCameraIdentities = enrollment.trustedCameraIdentities,
-            )
-        } finally {
-            embedding.fill(0f)
-            enrollment.close()
+        val decoded = try { NearbyProtectionPayload.decode(plaintext) } finally { plaintext.fill(0) }
+            ?: return failClient("Nearby biometric profile was incompatible")
+        decoded.face?.let { faceBytes ->
+            val enrollment = try { EnrollmentProfileCodec.decode(faceBytes) } finally { faceBytes.fill(0) }
+                ?: return failClient("Face profile model was incompatible")
+            val embedding = enrollment.embeddingCopy()
+            val profile = try {
+                SessionProfile(
+                    sessionId = pending.sessionId,
+                    consent = pending.consent,
+                    modelId = enrollment.modelId,
+                    embedding = embedding,
+                    presentation = enrollment.presentation,
+                    avatarStyle = enrollment.avatarStyle,
+                    avatarPreset = enrollment.avatarPreset,
+                    deviceIdentity = enrollment.deviceIdentity,
+                    displayName = enrollment.displayName,
+                    trustedCameraIdentities = enrollment.trustedCameraIdentities,
+                )
+            } finally {
+                embedding.fill(0f)
+                enrollment.close()
+            }
+            onProfile(profile)
         }
-        onProfile(profile)
+        decoded.voice?.let { voice ->
+            try { onVoiceProfile(NearbyVoiceProfile(pending.sessionId, voice)) }
+            finally { voice.forEach { it.fill(0f) } }
+        }
         receivedSessionIds += pending.sessionId
-        onStatus("Nearby ${pending.consent.label} face profile received automatically")
+        onStatus("Nearby ${pending.consent.label} profile received automatically")
         clearClient()
     }
 
@@ -390,6 +405,6 @@ class PreciseProfileTransport(
         private const val MAX_PACKET_BYTES = 160
         private const val PREFERRED_MTU = 185
         private const val RETRY_DELAY_MS = 3_000L
-        private const val TRANSFER_TIMEOUT_MS = 12_000L
+        private const val TRANSFER_TIMEOUT_MS = 30_000L
     }
 }

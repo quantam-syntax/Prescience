@@ -9,6 +9,7 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import com.atreides.consentvoice.ImportedAudioDecoder
 import com.atreides.consentvoice.QairtFixedShapeSeparator
@@ -18,6 +19,7 @@ import com.atreides.voiceconsent.SeparatorBackend
 import com.atreides.voiceconsent.SourceAwareRedactionProcessor
 import com.atreides.voiceconsent.SourceSelectionPolicy
 import com.atreides.voiceconsent.Windowed16kTwoSpeakerSeparator
+import com.example.consent_cam.ble.NearbyVoiceRequest
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -40,8 +42,14 @@ data class ProtectedVideoResult(
 /** Publishes a face-protected capture only after its voice track is replaced. */
 object ProtectedVideoExporter {
     private const val sampleRate = 16_000
+    private const val protectedVideoLeakageSuppressionStrength = 0.85
+    private const val protectedVideoSpectralDominanceWeight = 0.75
 
-    suspend fun export(context: Context, stagedUri: Uri): ProtectedVideoResult = withContext(Dispatchers.IO) {
+    suspend fun export(
+        context: Context,
+        stagedUri: Uri,
+        remoteVoiceRequests: List<NearbyVoiceRequest>? = null,
+    ): ProtectedVideoResult = withContext(Dispatchers.IO) {
         require(stagedUri.scheme == "file") { "Expected a private staged video" }
         val source = File(requireNotNull(stagedUri.path)).canonicalFile
         require(source.parentFile == context.cacheDir.canonicalFile && source.name.startsWith("protected-video-")) {
@@ -49,26 +57,41 @@ object ProtectedVideoExporter {
         }
         val remuxed = File.createTempFile("protected-export-", ".mp4", context.cacheDir)
         try {
-            val passport = VoicePassportStore(context).load().getOrElse {
-                error("Enroll a Voice Passport in Consent Audio before using Protected video")
-            }
-            val originalPcm = ImportedAudioDecoder.decodeTo16kMono(context, stagedUri)
-            val redacted = OnDeviceVoicePipeline(context).use { pipeline ->
-                Windowed16kTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
-                    SourceAwareRedactionProcessor(separator, SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO)
-                        .redact(originalPcm, pipeline, passport)
+            val passport = if (remoteVoiceRequests != null) remoteVoiceRequests.singleOrNull()?.samples
+                else VoicePassportStore(context).load().getOrElse {
+                    error("Enroll a Voice Passport in Consent Audio before using Protected video")
                 }
+            val processed = runCatching {
+                requireNotNull(passport) { "One usable nearby voice profile is required" }
+                val originalPcm = ImportedAudioDecoder.decodeTo16kMono(context, stagedUri)
+                try {
+                    val redacted = OnDeviceVoicePipeline(context).use { pipeline ->
+                        Windowed16kTwoSpeakerSeparator(QairtFixedShapeSeparator(context)).use { separator ->
+                            SourceAwareRedactionProcessor(
+                                separator,
+                                SourceSelectionPolicy.HIGHEST_PASSPORT_SCORE_FOR_DEMO,
+                                leakageSuppressionStrength = protectedVideoLeakageSuppressionStrength,
+                                spectralDominanceWeight = protectedVideoSpectralDominanceWeight,
+                                adaptiveLeakageLevelMatch = true,
+                                useRetainedSourceAsBase = true,
+                            )
+                                .redact(originalPcm, pipeline, passport)
+                        }
+                    }
+                    require(redacted.backend == SeparatorBackend.QAIRT_HTP) { "NPU voice separation unavailable" }
+                    require(redacted.identityMatched) { "Protected voice could not be identified" }
+                    require(redacted.sanitized.size == originalPcm.size && redacted.sanitized.all { it.isFinite() }) {
+                        "Voice output was invalid"
+                    }
+                    redacted
+                } finally { originalPcm.fill(0f) }
             }
-            require(redacted.backend == SeparatorBackend.QAIRT_HTP) {
-                "NPU voice separation unavailable; private video was not published"
-            }
-            require(redacted.identityMatched) {
-                "Protected voice could not be identified; private video was not published"
-            }
-            require(redacted.sanitized.size == originalPcm.size && redacted.sanitized.all { it.isFinite() }) {
-                "Voice output was invalid; private video was not published"
-            }
-            val encodedAudio = encodeAac(redacted.sanitized)
+            // Missing profiles or failed separation cannot safely keep the
+            // original microphone track. Do not publish a misleading silent
+            // "Protected" video either; surface the failure to the camera.
+            val redacted = processed.getOrThrow()
+            val audio = redacted.sanitized
+            val encodedAudio = try { encodeAac(audio) } finally { audio.fill(0f) }
             muxProtectedVideo(source, remuxed, encodedAudio)
             val uri = publish(context, remuxed)
             ProtectedVideoResult(
@@ -175,13 +198,17 @@ object ProtectedVideoExporter {
             var buffer = ByteBuffer.allocateDirect(1024 * 1024)
             val info = MediaCodec.BufferInfo()
             while (true) {
-                val required = extractor.sampleSize
+                val required = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) extractor.sampleSize else buffer.capacity().toLong()
                 if (required < 0) break
                 if (required > buffer.capacity()) buffer = ByteBuffer.allocateDirect(required.toInt())
                 buffer.clear()
                 val size = extractor.readSampleData(buffer, 0)
                 if (size < 0) break
-                info.set(0, size, extractor.sampleTime, extractor.sampleFlags)
+                require(size <= buffer.capacity()) { "Video sample exceeded mux buffer" }
+                val keyFrameFlag = if (extractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
+                    MediaCodec.BUFFER_FLAG_KEY_FRAME
+                } else 0
+                info.set(0, size, extractor.sampleTime, keyFrameFlag)
                 muxer.writeSampleData(outputVideo, buffer, info)
                 videoSamples++
                 extractor.advance()

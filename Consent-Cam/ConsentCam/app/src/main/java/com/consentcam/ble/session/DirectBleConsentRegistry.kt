@@ -18,6 +18,8 @@ class DirectBleConsentRegistry(
         val sessionId: UInt,
         val consent: ConsentStatus,
         val proximity: ProximityState,
+        val voiceMuteRequested: Boolean = false,
+        val voiceProfileAvailable: Boolean = false,
     )
 
     private data class SeenSession(var flags: UByte, var lastSeenMs: Long)
@@ -86,5 +88,7 @@ class DirectBleConsentRegistry(
         sessionId = sessionId,
         consent = if (ConsentFlags.isAllow(flags)) ConsentStatus.ALLOW else ConsentStatus.PROTECT,
         proximity = proximity,
+        voiceMuteRequested = ConsentFlags.mutesVoice(flags),
+        voiceProfileAvailable = ConsentFlags.hasVoiceProfile(flags),
     )
 }

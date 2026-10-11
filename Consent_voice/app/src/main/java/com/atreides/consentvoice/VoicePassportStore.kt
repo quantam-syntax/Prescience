@@ -38,6 +38,12 @@ class VoicePassportStore(context: Context) {
         } finally { plain.fill(0) }
     } }
 
+    /** Removes only this encrypted passport and its key; existing exports are untouched. */
+    suspend fun delete(): Result<Unit> = withContext(Dispatchers.IO) { runCatching {
+        if (file.exists()) check(file.delete()) { "Could not remove Voice Passport" }
+        KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(KEY_ALIAS)
+    } }
+
     private fun encode(samples: List<FloatArray>): ByteArray = ByteBuffer.allocate(1 + 1 + 2 + samples.sumOf { it.size * 4 }).order(ByteOrder.BIG_ENDIAN)
         .put(1).put(samples.size.toByte()).putShort(samples.first().size.toShort()).also { buffer -> samples.forEach { values -> values.forEach(buffer::putFloat) } }.array()
 

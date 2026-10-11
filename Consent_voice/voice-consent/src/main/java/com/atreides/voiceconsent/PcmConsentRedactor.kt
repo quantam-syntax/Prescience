@@ -43,6 +43,29 @@ object PcmConsentRedactor {
         return output
     }
 
+    /** Never returns to the original mix when a separated retained source is available. */
+    fun redactRetainedSource(
+        retained16kMono: FloatArray,
+        protectedDecisions: List<LocalSpeechDecision>,
+        retainedSpeech: List<LocalSpeechDecision>,
+    ): FloatArray {
+        val output = retained16kMono.copyOf()
+        protectedDecisions.forEach { protected ->
+            val start = protected.startSample.coerceIn(0, output.size)
+            val end = protected.endSample.coerceIn(start, output.size)
+            output.fill(0f, start, end)
+        }
+        // Restore only the retained speaker's own detected intervals. This
+        // preserves overlap without letting an entire protected turn through
+        // merely because the other speaker uttered one word inside it.
+        retainedSpeech.forEach { other ->
+            val start = other.startSample.coerceIn(0, output.size)
+            val end = other.endSample.coerceIn(start, output.size)
+            retained16kMono.copyInto(output, start, start, end)
+        }
+        return output
+    }
+
     private fun applyEdgeFades(output: FloatArray, start: Int, end: Int) {
         val fade = minOf(FADE_SAMPLES, (end - start) / 2)
         for (index in 0 until fade) {

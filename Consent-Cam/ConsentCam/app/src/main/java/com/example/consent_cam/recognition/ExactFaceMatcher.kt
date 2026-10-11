@@ -73,8 +73,8 @@ class ExactFaceMatcher(
                 // ALLOW competition is unsafe to resolve automatically.
                 second != null &&
                     best.second - second < ambiguityMargin &&
-                    best.first.consent != sorted[1].first.consent -> FaceMatchState.AMBIGUOUS
-                best.first.consent == com.example.consent_cam.ble.AppearanceConsent.PROTECT -> {
+                    best.first.consent.protectsFace != sorted[1].first.consent.protectsFace -> FaceMatchState.AMBIGUOUS
+                best.first.consent.protectsFace -> {
                     FaceMatchState.MATCHED_PROTECT
                 }
                 else -> FaceMatchState.MATCHED_ALLOW

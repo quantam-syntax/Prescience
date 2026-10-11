@@ -9,6 +9,7 @@ import com.consentcam.ble.api.ConsentAdvertisement
 object ConsentAdvertisementCodec {
     const val SERVICE_UUID: String = "83c3b46e-0aef-4a4b-8b9e-44865c70a931"
     const val PROTOCOL_VERSION: UByte = 1u
+    const val VOICE_PROTOCOL_VERSION: UByte = 2u
     const val PAYLOAD_SIZE_BYTES: Int = 10
 
     sealed interface DecodeResult {
@@ -24,9 +25,12 @@ object ConsentAdvertisementCodec {
         rotatingToken: UInt,
     ): ByteArray {
         require(!ConsentFlags.hasUnknownBits(flags)) { "Unknown consent flag bits" }
+        require(!ConsentFlags.hasVoiceProfile(flags) || ConsentFlags.mutesVoice(flags)) {
+            "Voice profile requires voice protection"
+        }
 
         return ByteArray(PAYLOAD_SIZE_BYTES).also { output ->
-            output[0] = PROTOCOL_VERSION.toByte()
+            output[0] = (if (ConsentFlags.mutesVoice(flags)) VOICE_PROTOCOL_VERSION else PROTOCOL_VERSION).toByte()
             writeUInt(output, offset = 1, sessionId)
             output[5] = flags.toByte()
             writeUInt(output, offset = 6, rotatingToken)
@@ -39,12 +43,15 @@ object ConsentAdvertisementCodec {
         }
 
         val version = payload[0].toUByte()
-        if (version != PROTOCOL_VERSION) {
+        if (version != PROTOCOL_VERSION && version != VOICE_PROTOCOL_VERSION) {
             return DecodeResult.UnsupportedVersion(version)
         }
 
         val flags = payload[5].toUByte()
-        if (ConsentFlags.hasUnknownBits(flags)) {
+        if (ConsentFlags.hasUnknownBits(flags) ||
+            (version == PROTOCOL_VERSION && ConsentFlags.mutesVoice(flags)) ||
+            (ConsentFlags.hasVoiceProfile(flags) && !ConsentFlags.mutesVoice(flags))
+        ) {
             return DecodeResult.UnknownFlags(flags)
         }
 

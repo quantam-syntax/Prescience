@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -79,6 +80,7 @@ private fun ConsentVoiceApp() {
     var state by remember { mutableStateOf<SessionState>(SessionState.Idle) }
     var persona by remember { mutableStateOf(PersonaEmojiProfile()) }
     var profile by remember { mutableStateOf<List<FloatArray>?>(null) }
+    var confirmPassportDeletion by remember { mutableStateOf(false) }
     var captureMode by remember { mutableStateOf<CaptureMode?>(null) }
     var sessionResult by remember { mutableStateOf("No consent session has been exported.") }
     var liveTranscript by remember { mutableStateOf("") }
@@ -308,6 +310,9 @@ private fun ConsentVoiceApp() {
                     ) {
                         Text(if (profile == null) "Voice Passport with Camera Guidance" else "Replace Voice Passport with Camera Guidance")
                     }
+                    if (profile != null) {
+                        TextButton(onClick = { confirmPassportDeletion = true }) { Text("Remove Voice Passport") }
+                    }
                     Button(
                         enabled = profile != null,
                         onClick = {
@@ -428,6 +433,26 @@ private fun ConsentVoiceApp() {
             }
         }
     }
+    if (confirmPassportDeletion) AlertDialog(
+        onDismissRequest = { confirmPassportDeletion = false },
+        title = { Text("Remove Voice Passport?") },
+        text = { Text("This removes the encrypted voice profile and stops broadcasting it. Existing sanitized recordings are kept.") },
+        confirmButton = { TextButton(onClick = {
+            confirmPassportDeletion = false
+            scope.launch {
+                passportStore.delete().fold(
+                    onSuccess = {
+                        profile?.forEach { it.fill(0f) }
+                        profile = null
+                        state = SessionState.EnrollmentRequired
+                        sessionResult = "Voice Passport removed. Enroll again to protect your voice."
+                    },
+                    onFailure = { sessionResult = "Could not remove Voice Passport: ${it.message}" },
+                )
+            }
+        }) { Text("Remove") } },
+        dismissButton = { TextButton(onClick = { confirmPassportDeletion = false }) { Text("Cancel") } },
+    )
 }
 
 @androidx.compose.runtime.Composable

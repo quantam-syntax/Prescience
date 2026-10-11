@@ -32,7 +32,16 @@ enum class SourceSelectionPolicy {
 class SourceAwareRedactionProcessor(
     private val separator: TwoSpeakerSeparator,
     private val selectionPolicy: SourceSelectionPolicy = SourceSelectionPolicy.PRIVACY_FIRST,
+    private val leakageSuppressionStrength: Double = 0.45,
+    private val spectralDominanceWeight: Double = 0.0,
+    private val adaptiveLeakageLevelMatch: Boolean = false,
+    private val useRetainedSourceAsBase: Boolean = false,
 ) {
+    init {
+        require(leakageSuppressionStrength in 0.0..1.0)
+        require(spectralDominanceWeight in 0.0..1.0)
+    }
+
     fun redact(
         mixed: FloatArray,
         pipeline: OnDeviceVoicePipeline,
@@ -90,7 +99,13 @@ class SourceAwareRedactionProcessor(
         }
         val retainedAudio = runCatching {
             if (separator is Windowed16kTwoSpeakerSeparator) {
-                CoherentLeakageSuppressor.suppress(selected.retainedAudio, selected.protectedAudio)
+                CoherentLeakageSuppressor.suppress(
+                    selected.retainedAudio,
+                    selected.protectedAudio,
+                    strength = leakageSuppressionStrength,
+                    spectralDominanceWeight = spectralDominanceWeight,
+                    adaptiveLevelMatch = adaptiveLeakageLevelMatch,
+                )
             } else {
                 SeparatedVoiceClarifier.clarify(selected.retainedAudio)
             }
@@ -119,7 +134,13 @@ class SourceAwareRedactionProcessor(
             LocalSpeechDecision(it.startSample, it.endSample, it.score, SpeechState.OVERLAP)
         }
         return SourceAwareRedactionResult(
-            sanitized = PcmConsentRedactor.redactWithReplacements(mixed, decisions, replacements),
+            sanitized = if (useRetainedSourceAsBase) {
+                PcmConsentRedactor.redactRetainedSource(
+                    retainedAudio,
+                    mixedDecisions.filter { it.state == SpeechState.PROTECTED } + selected.protected,
+                    selected.other,
+                )
+            } else PcmConsentRedactor.redactWithReplacements(mixed, decisions, replacements),
             protectedOnlyMuted = protectedOnly,
             overlapSeparated = replacements.size,
             overlapFullyMutedForSafety = selected.protected.size - replacements.size,

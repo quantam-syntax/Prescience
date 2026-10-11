@@ -56,9 +56,9 @@ class ConsentAdvertisementCodecTest {
             ConsentAdvertisementCodec.decode(byteArrayOf(1), rssi = -50),
         )
         val unsupportedVersion = ByteArray(ConsentAdvertisementCodec.PAYLOAD_SIZE_BYTES)
-        unsupportedVersion[0] = 2
+        unsupportedVersion[0] = 3
         assertEquals(
-            ConsentAdvertisementCodec.DecodeResult.UnsupportedVersion(2u),
+            ConsentAdvertisementCodec.DecodeResult.UnsupportedVersion(3u),
             ConsentAdvertisementCodec.decode(unsupportedVersion, rssi = -50),
         )
         val unknownFlags = ByteArray(ConsentAdvertisementCodec.PAYLOAD_SIZE_BYTES)
@@ -68,6 +68,17 @@ class ConsentAdvertisementCodecTest {
             ConsentAdvertisementCodec.DecodeResult.UnknownFlags(0x40u),
             ConsentAdvertisementCodec.decode(unknownFlags, rssi = -50),
         )
+    }
+
+    @Test
+    fun voiceConsentUsesVersionTwoAndLegacyFaceVersionStillDecodes() {
+        val voiceFlags = (ConsentFlags.ALLOW_APPEARANCE or ConsentFlags.MUTE_VOICE or ConsentFlags.VOICE_PROFILE_AVAILABLE).toUByte()
+        val payload = ConsentAdvertisementCodec.encode(7u, voiceFlags, 9u)
+        assertEquals(2, payload[0].toInt())
+        val result = ConsentAdvertisementCodec.decode(payload, -50) as ConsentAdvertisementCodec.DecodeResult.Success
+        assertEquals(voiceFlags, result.advertisement.flags)
+        val invalid = payload.copyOf().also { it[0] = 1 }
+        assertTrue(ConsentAdvertisementCodec.decode(invalid, -50) is ConsentAdvertisementCodec.DecodeResult.UnknownFlags)
     }
 
     @Test

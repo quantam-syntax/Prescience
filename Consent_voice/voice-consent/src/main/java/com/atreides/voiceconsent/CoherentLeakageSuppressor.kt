@@ -15,10 +15,17 @@ object CoherentLeakageSuppressor {
     private const val bins = size / 2 + 1
     private val window = DoubleArray(size) { index -> 0.5 - 0.5 * cos(2.0 * PI * index / size) }
 
-    fun suppress(retained: FloatArray, other: FloatArray, strength: Double = 0.45): FloatArray {
+    fun suppress(
+        retained: FloatArray,
+        other: FloatArray,
+        strength: Double = 0.45,
+        spectralDominanceWeight: Double = 0.0,
+        adaptiveLevelMatch: Boolean = false,
+    ): FloatArray {
         require(retained.size == other.size && retained.isNotEmpty()) { "Separated streams must align" }
         require(retained.all { it.isFinite() } && other.all { it.isFinite() }) { "Invalid separated audio" }
         require(strength in 0.0..1.0)
+        require(spectralDominanceWeight in 0.0..1.0)
         val retainedRms = sqrt(retained.sumOf { it.toDouble() * it } / retained.size)
         val otherRms = sqrt(other.sumOf { it.toDouble() * it } / other.size)
         if (retainedRms < 1e-8 || otherRms < 1e-8 || strength == 0.0) return retained.copyOf()
@@ -36,9 +43,11 @@ object CoherentLeakageSuppressor {
                 imaginary[index] = 0.0
             }
             fft(real, imaginary, false)
+            var targetFramePower = 0.0
             for (bin in 0 until bins) {
                 val at = frame * bins + bin
                 targetRe[at] = real[bin]; targetIm[at] = imaginary[bin]
+                targetFramePower += real[bin] * real[bin] + imaginary[bin] * imaginary[bin]
             }
             for (index in 0 until size) {
                 val position = center + index - size / 2
@@ -46,9 +55,19 @@ object CoherentLeakageSuppressor {
                 imaginary[index] = 0.0
             }
             fft(real, imaginary, false)
+            var otherFramePower = 0.0
+            for (bin in 0 until bins) {
+                otherFramePower += real[bin] * real[bin] + imaginary[bin] * imaginary[bin]
+            }
+            // A quiet protected voice can sit well below the retained speaker.
+            // Match only upward, and cap the adjustment so a nearly silent
+            // removed stream cannot erase the retained speaker's whole frame.
+            val localScale = if (adaptiveLevelMatch && otherFramePower > 1e-8) {
+                sqrt(targetFramePower / otherFramePower).coerceIn(1.0, 2.5)
+            } else 1.0
             for (bin in 0 until bins) {
                 val at = frame * bins + bin
-                otherRe[at] = real[bin]; otherIm[at] = imaginary[bin]
+                otherRe[at] = real[bin] * localScale; otherIm[at] = imaginary[bin] * localScale
             }
         }
         val targetPower = DoubleArray(count) { targetRe[it] * targetRe[it] + targetIm[it] * targetIm[it] }
@@ -66,7 +85,13 @@ object CoherentLeakageSuppressor {
             tp /= 9.0; op /= 9.0; cr /= 9.0; ci /= 9.0
             val coherence = min(1.0, (cr * cr + ci * ci) / (tp * op + 1e-12))
             val otherFraction = op / (tp + op + 1e-12)
-            gain[frame * bins + bin] = max(0.2, 1.0 - strength * coherence * otherFraction)
+            // A separator can phase-distort leaked speech, so cross-stream
+            // coherence alone can miss it. Protected video also uses spectral
+            // dominance of the removed source, while leaving frequency bins
+            // without that source close to their original level.
+            val leakEvidence = otherFraction *
+                (coherence + spectralDominanceWeight * (1.0 - coherence))
+            gain[frame * bins + bin] = max(0.08, 1.0 - strength * leakEvidence)
         }
         val output = DoubleArray(retained.size)
         val normalization = DoubleArray(retained.size)
